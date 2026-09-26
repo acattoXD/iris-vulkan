@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"iris_native_probe","version":"1","name":"Isolated native shader probe","environment":"client","mixins":["iris-native-probe.mixins.json"],"depends":{"minecraft":"26.3","fabricloader":">=0.19.5","iris":"*"}}

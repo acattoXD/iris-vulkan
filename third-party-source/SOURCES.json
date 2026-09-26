@@ -1,0 +1,187 @@
+{
+  "compilePrerequisites": [
+    {
+      "file": "DHApi.jar",
+      "purpose": "compile-only; Java sources embedded; LGPLv3/GPLv3 texts in licenses/",
+      "sha256": "d87c8d0a92cddb4dd9142a037e83826abe5ea81efb93eb4fa2876017ea7a6dc4",
+      "sourceFiles": 134,
+      "version": "2.1.3-a-dev"
+    }
+  ],
+  "sources": [
+    {
+      "coordinate": "org.antlr:antlr4-runtime:4.13.1",
+      "file": "third-party-source/antlr4-runtime-4.13.1/antlr4-runtime-4.13.1-sources.jar",
+      "sha256": "0239ef67bc775e654b2f447f3819d3366fb245ddfc623b8b6fd534907472d178",
+      "url": "https://repo.maven.apache.org/maven2/org/antlr/antlr4-runtime/4.13.1/antlr4-runtime-4.13.1-sources.jar"
+    },
+    {
+      "coordinate": "org.antlr:antlr4-runtime:4.13.1",
+      "file": "third-party-source/antlr4-runtime-4.13.1/antlr4-runtime-4.13.1.pom",
+      "sha256": "19226b17bfa38f99ea226b22e97420e2a8ede09a97420fb1acf186d9ada46571",
+      "url": "https://repo.maven.apache.org/maven2/org/antlr/antlr4-runtime/4.13.1/antlr4-runtime-4.13.1.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-api-base:2.0.6+fcdff87f02",
+      "file": "third-party-source/fabric-api-base-2.0.6+fcdff87f02/fabric-api-base-2.0.6+fcdff87f02-sources.jar",
+      "sha256": "8891a2aa41c0a91c014472ec23880782864d593eca93e98fe0c4aa5e78e903a1",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api-base/2.0.6+fcdff87f02/fabric-api-base-2.0.6+fcdff87f02-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-api-base:2.0.6+fcdff87f02",
+      "file": "third-party-source/fabric-api-base-2.0.6+fcdff87f02/fabric-api-base-2.0.6+fcdff87f02.pom",
+      "sha256": "9e7f04e7d430a9a59570bfd8272ad4c15488d3e86df9f950db925b2de496b69a",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api-base/2.0.6+fcdff87f02/fabric-api-base-2.0.6+fcdff87f02.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-block-getter-api-v2:2.0.9+3434d6d902",
+      "file": "third-party-source/fabric-block-getter-api-v2-2.0.9+3434d6d902/fabric-block-getter-api-v2-2.0.9+3434d6d902-sources.jar",
+      "sha256": "4bcb9f16019b36e26f0cab3ebc10ccc3c6132029ab8c5466c9ce3bb73eb53699",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-block-getter-api-v2/2.0.9+3434d6d902/fabric-block-getter-api-v2-2.0.9+3434d6d902-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-block-getter-api-v2:2.0.9+3434d6d902",
+      "file": "third-party-source/fabric-block-getter-api-v2-2.0.9+3434d6d902/fabric-block-getter-api-v2-2.0.9+3434d6d902.pom",
+      "sha256": "c5eab5aa8aba678b008c466b81da5a871d7cb089889a00cd2a84b98f9cb190f1",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-block-getter-api-v2/2.0.9+3434d6d902/fabric-block-getter-api-v2-2.0.9+3434d6d902.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-key-mapping-api-v1:2.0.8+3434d6d902",
+      "file": "third-party-source/fabric-key-mapping-api-v1-2.0.8+3434d6d902/fabric-key-mapping-api-v1-2.0.8+3434d6d902-sources.jar",
+      "sha256": "dce95133fffcb01e53a6ff98f0293a2cfdd67ae47cbdcc7a379bfb3dbc5a7f7b",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-key-mapping-api-v1/2.0.8+3434d6d902/fabric-key-mapping-api-v1-2.0.8+3434d6d902-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-key-mapping-api-v1:2.0.8+3434d6d902",
+      "file": "third-party-source/fabric-key-mapping-api-v1-2.0.8+3434d6d902/fabric-key-mapping-api-v1-2.0.8+3434d6d902.pom",
+      "sha256": "0a719b774695f13f9df969c18b8a8ad7581bef1e5d1b58e134a539f679a364ce",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-key-mapping-api-v1/2.0.8+3434d6d902/fabric-key-mapping-api-v1-2.0.8+3434d6d902.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:4.1.9+ffef5f6702",
+      "file": "third-party-source/fabric-lifecycle-events-v1-4.1.9+ffef5f6702/fabric-lifecycle-events-v1-4.1.9+ffef5f6702-sources.jar",
+      "sha256": "eb04a9fb466d902e8d6983587bc4cf8a173e50ed03e5af3a0990374d1812f7b0",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-lifecycle-events-v1/4.1.9+ffef5f6702/fabric-lifecycle-events-v1-4.1.9+ffef5f6702-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:4.1.9+ffef5f6702",
+      "file": "third-party-source/fabric-lifecycle-events-v1-4.1.9+ffef5f6702/fabric-lifecycle-events-v1-4.1.9+ffef5f6702.pom",
+      "sha256": "08cc38a327d6628d9fa3e337bcb37f7295703d0bb33fd7410c6c28d3578bd42b",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-lifecycle-events-v1/4.1.9+ffef5f6702/fabric-lifecycle-events-v1-4.1.9+ffef5f6702.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-renderer-api-v1:17.0.14+2ce735b802",
+      "file": "third-party-source/fabric-renderer-api-v1-17.0.14+2ce735b802/fabric-renderer-api-v1-17.0.14+2ce735b802-sources.jar",
+      "sha256": "17568990cff8e0e2a77e94c28d93cee5cb3c0107d940673a2fbfdc6a2cf3f1c7",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-renderer-api-v1/17.0.14+2ce735b802/fabric-renderer-api-v1-17.0.14+2ce735b802-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-renderer-api-v1:17.0.14+2ce735b802",
+      "file": "third-party-source/fabric-renderer-api-v1-17.0.14+2ce735b802/fabric-renderer-api-v1-17.0.14+2ce735b802.pom",
+      "sha256": "ff8cce4c718e13f225ea1fbed52b741c8aae8bca7f5918bb2133624c839e7bbd",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-renderer-api-v1/17.0.14+2ce735b802/fabric-renderer-api-v1-17.0.14+2ce735b802.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-rendering-fluids-v1:6.0.6+3434d6d902",
+      "file": "third-party-source/fabric-rendering-fluids-v1-6.0.6+3434d6d902/fabric-rendering-fluids-v1-6.0.6+3434d6d902-sources.jar",
+      "sha256": "998b23dfb1256eb0d93b05060712020cf559d97dd423a0c1ec3c53c51e542d82",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-rendering-fluids-v1/6.0.6+3434d6d902/fabric-rendering-fluids-v1-6.0.6+3434d6d902-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-rendering-fluids-v1:6.0.6+3434d6d902",
+      "file": "third-party-source/fabric-rendering-fluids-v1-6.0.6+3434d6d902/fabric-rendering-fluids-v1-6.0.6+3434d6d902.pom",
+      "sha256": "0cb969f52eb3b041188933227dcf738917558428ed8d60402f9d85c5e3185190",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-rendering-fluids-v1/6.0.6+3434d6d902/fabric-rendering-fluids-v1-6.0.6+3434d6d902.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-rendering-v1:27.0.14+901a437c02",
+      "file": "third-party-source/fabric-rendering-v1-27.0.14+901a437c02/fabric-rendering-v1-27.0.14+901a437c02-sources.jar",
+      "sha256": "3c8fae34c82a376dd05d3d21d566d64bbeebd96318e53f03f038c63079df993b",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-rendering-v1/27.0.14+901a437c02/fabric-rendering-v1-27.0.14+901a437c02-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-rendering-v1:27.0.14+901a437c02",
+      "file": "third-party-source/fabric-rendering-v1-27.0.14+901a437c02/fabric-rendering-v1-27.0.14+901a437c02.pom",
+      "sha256": "6339ae32a15b1c79fb6b44716f37acb0d45f0aaf027d645767e67907007c9400",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-rendering-v1/27.0.14+901a437c02/fabric-rendering-v1-27.0.14+901a437c02.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-resource-loader-v0:3.3.26+4fc5413f02",
+      "file": "third-party-source/fabric-resource-loader-v0-3.3.26+4fc5413f02/fabric-resource-loader-v0-3.3.26+4fc5413f02-sources.jar",
+      "sha256": "2f0ec42c746b85560fc101b5b8963cdacfe175c900aa2f8f10e30675316131c1",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-resource-loader-v0/3.3.26+4fc5413f02/fabric-resource-loader-v0-3.3.26+4fc5413f02-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-resource-loader-v0:3.3.26+4fc5413f02",
+      "file": "third-party-source/fabric-resource-loader-v0-3.3.26+4fc5413f02/fabric-resource-loader-v0-3.3.26+4fc5413f02.pom",
+      "sha256": "008da84ad7a31479cd6d96e55c8f4849a378b680d86ff42705c66f9b85863145",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-resource-loader-v0/3.3.26+4fc5413f02/fabric-resource-loader-v0-3.3.26+4fc5413f02.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-resource-loader-v1:3.0.4+fcdff87f02",
+      "file": "third-party-source/fabric-resource-loader-v1-3.0.4+fcdff87f02/fabric-resource-loader-v1-3.0.4+fcdff87f02-sources.jar",
+      "sha256": "41d577daaace3a69577b3226a0e900112f11073ca2db1c8b65f54d54f0615b6f",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-resource-loader-v1/3.0.4+fcdff87f02/fabric-resource-loader-v1-3.0.4+fcdff87f02-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-resource-loader-v1:3.0.4+fcdff87f02",
+      "file": "third-party-source/fabric-resource-loader-v1-3.0.4+fcdff87f02/fabric-resource-loader-v1-3.0.4+fcdff87f02.pom",
+      "sha256": "b6d39d8f68a3eac6b326344753d1c1ae8b2e4883e93226226b126220078b4133",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-resource-loader-v1/3.0.4+fcdff87f02/fabric-resource-loader-v1-3.0.4+fcdff87f02.pom"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-transitive-access-wideners-v1:8.1.16+52268a0e02",
+      "file": "third-party-source/fabric-transitive-access-wideners-v1-8.1.16+52268a0e02/fabric-transitive-access-wideners-v1-8.1.16+52268a0e02-sources.jar",
+      "sha256": "ce23136084c2ddd984242b649d39368faef4a5f4e0c59bc33439182f411f019a",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-transitive-access-wideners-v1/8.1.16+52268a0e02/fabric-transitive-access-wideners-v1-8.1.16+52268a0e02-sources.jar"
+    },
+    {
+      "coordinate": "net.fabricmc.fabric-api:fabric-transitive-access-wideners-v1:8.1.16+52268a0e02",
+      "file": "third-party-source/fabric-transitive-access-wideners-v1-8.1.16+52268a0e02/fabric-transitive-access-wideners-v1-8.1.16+52268a0e02.pom",
+      "sha256": "c2272ae49a694952fab2e3d378cf6cfcd47e8cec9d8fcade55401dc63b90ad82",
+      "url": "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-transitive-access-wideners-v1/8.1.16+52268a0e02/fabric-transitive-access-wideners-v1-8.1.16+52268a0e02.pom"
+    },
+    {
+      "coordinate": "io.github.douira:glsl-transformer:3.0.0-pre3",
+      "file": "third-party-source/glsl-transformer-3.0.0-pre3/glsl-transformer-3.0.0-pre3-sources.jar",
+      "sha256": "82274b7fa24db657176a71e12181f49e93863be50b578e903bc0e0451812a817",
+      "url": "https://repo.maven.apache.org/maven2/io/github/douira/glsl-transformer/3.0.0-pre3/glsl-transformer-3.0.0-pre3-sources.jar"
+    },
+    {
+      "coordinate": "io.github.douira:glsl-transformer:3.0.0-pre3",
+      "file": "third-party-source/glsl-transformer-3.0.0-pre3/glsl-transformer-3.0.0-pre3.pom",
+      "sha256": "df31d8b18d15ed21be598f786fb7319dea12dcf2e86ee99738876b2c8f028ed9",
+      "url": "https://repo.maven.apache.org/maven2/io/github/douira/glsl-transformer/3.0.0-pre3/glsl-transformer-3.0.0-pre3.pom"
+    },
+    {
+      "coordinate": "org.anarres:jcpp:1.4.14",
+      "file": "third-party-source/jcpp-1.4.14/jcpp-1.4.14-sources.jar",
+      "sha256": "d7e5689dc4cbbd5ab3ecc0fc791e8e21e0e3f82c14612c34f7be30726f609a0c",
+      "url": "https://repo.maven.apache.org/maven2/org/anarres/jcpp/1.4.14/jcpp-1.4.14-sources.jar"
+    },
+    {
+      "coordinate": "org.anarres:jcpp:1.4.14",
+      "file": "third-party-source/jcpp-1.4.14/jcpp-1.4.14.pom",
+      "sha256": "a1a337d962e9bc87cfae737f4bcba5395b3e2372067960d32f7f941d6e40bc0e",
+      "url": "https://repo.maven.apache.org/maven2/org/anarres/jcpp/1.4.14/jcpp-1.4.14.pom"
+    },
+    {
+      "file": "third-party-source/glsl-transformer-3.0.0-pre3-upstream.zip",
+      "kind": "upstream-build-inputs",
+      "sha256": "884b3bf78e16d437940bdad392a22ec4e97941e2c6f2097b76ae99d142c75519",
+      "url": "https://codeload.github.com/IrisShaders/glsl-transformer/zip/refs/tags/v3.0.0-pre3"
+    },
+    {
+      "file": "third-party-source/antlr4-4.13.1-upstream.zip",
+      "kind": "upstream-build-inputs",
+      "sha256": "365ff6aec0b1612fb964a763ca73748d80e0b3379cbdd9f82d86333eb8ae4638",
+      "url": "https://codeload.github.com/antlr/antlr4/zip/refs/tags/4.13.1"
+    },
+    {
+      "file": "third-party-source/fabric-api-0.160.5+26.3-upstream.zip",
+      "kind": "upstream-build-inputs",
+      "sha256": "fcfb846a3794961026178d397a0db7dde5e70ebaaf7ac12e274d8214ab80a5cb",
+      "url": "https://codeload.github.com/FabricMC/fabric/zip/refs/tags/0.160.5+26.3"
+    }
+  ]
+}

@@ -1,0 +1,565 @@
+package net.irisshaders.iris.vulkan;
+
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import net.irisshaders.iris.Iris;
+import net.irisshaders.iris.pipeline.transform.PatchShaderType;
+import net.irisshaders.iris.pipeline.transform.TransformPatcher;
+import net.irisshaders.iris.shaderpack.loading.ProgramArrayId;
+import net.irisshaders.iris.shaderpack.loading.ProgramId;
+import net.irisshaders.iris.shaderpack.properties.ProgramDirectives;
+import net.irisshaders.iris.shaderpack.programs.ProgramSet;
+import net.irisshaders.iris.shaderpack.programs.ProgramSource;
+import net.irisshaders.iris.shaderpack.texture.TextureStage;
+import net.minecraft.resources.Identifier;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public final class IrisVulkanScreenPassPlanner {
+	private static final int COLOR_TARGET_COUNT = IrisVulkanGbufferTargets.COLOR_TARGET_COUNT;
+	private static final int FINAL_SOURCE_TARGET = IrisVulkanGbufferTargets.FINAL_SOURCE_TARGET;
+	private static final Pattern SAMPLER = Pattern.compile("(?m)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?uniform\\s+([iu]?sampler\\w+)\\s+(\\w+)\\s*((?:\\[[^\\]]*\\])+)?\\s*;");
+	private static final Pattern IMAGE_UNIFORM = Pattern.compile("(?m)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?uniform\\s+(?:(?:readonly|writeonly|coherent|volatile)\\s+)*([iu]?image\\w+)\\s+(\\w+)\\s*((?:\\[[^\\]]*\\])+)?\\s*;");
+	private static final Pattern RESOURCE_BLOCK = Pattern.compile("(?ms)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?(?:(?:readonly|writeonly|coherent|volatile|restrict)\\s+)*(uniform|buffer)\\s+([A-Za-z_]\\w*)\\s*\\{.*?}\\s*([A-Za-z_]\\w*)?\\s*((?:\\[[^\\]]*\\])+)?\\s*;");
+	private static final Pattern IRIS_UNIFORM_BLOCK = Pattern.compile(
+		"(?ms)layout\\s*\\(\\s*std140\\s*\\)\\s*uniform\\s+IrisUniforms\\s*\\{.*?}\\s*;");
+
+	private IrisVulkanScreenPassPlanner() {
+	}
+
+	public static IrisVulkanScreenPassGraph create(ProgramSet programSet) {
+		List<GpuFormat> targetFormats = IrisVulkanTargetFormat.resolveTargetFormats(
+			programSet.getPackDirectives().getRenderTargetDirectives(), null, COLOR_TARGET_COUNT,
+			IrisVulkanGbufferTargets.FALLBACK_SCENE_TARGET);
+		List<IrisVulkanScreenPassGraph.Node> beginPasses = createPasses(programSet, ProgramArrayId.Begin,
+			TextureStage.BEGIN, "begin", IrisVulkanScreenPassGraph.Kind.BEGIN, targetFormats);
+		List<IrisVulkanScreenPassGraph.Node> preparePasses = createPasses(programSet, ProgramArrayId.Prepare,
+			TextureStage.PREPARE, "prepare", IrisVulkanScreenPassGraph.Kind.PREPARE, targetFormats);
+		List<IrisVulkanScreenPassGraph.Node> deferredPasses = createPasses(programSet, ProgramArrayId.Deferred,
+			TextureStage.DEFERRED, "deferred", IrisVulkanScreenPassGraph.Kind.DEFERRED, targetFormats);
+		List<IrisVulkanScreenPassGraph.Node> compositePasses = createPasses(programSet, ProgramArrayId.Composite,
+			TextureStage.COMPOSITE_AND_FINAL, "composite", IrisVulkanScreenPassGraph.Kind.COMPOSITE, targetFormats);
+		IrisVulkanScreenPassGraph.Node finalPass = createFinalPass(programSet, targetFormats);
+		IrisVulkanScreenPassGraph graph = new IrisVulkanScreenPassGraph(beginPasses, preparePasses,
+			deferredPasses, compositePasses, finalPass);
+
+		log(graph);
+		return graph;
+	}
+
+	private static List<IrisVulkanScreenPassGraph.Node> createPasses(ProgramSet programSet, ProgramArrayId programArrayId,
+																						 TextureStage stage, String namespace,
+																						 IrisVulkanScreenPassGraph.Kind kind, List<GpuFormat> targetFormats) {
+		List<IrisVulkanScreenPassGraph.Node> passes = new ArrayList<>();
+		ProgramSource[] sources = programSet.getComposite(programArrayId);
+
+		for (int i = 0; i < sources.length; i++) {
+			ProgramSource source = sources[i];
+
+			if (source == null || (source.getVertexSource().isEmpty() && source.getFragmentSource().isEmpty()
+				&& source.getGeometrySource().isEmpty() && source.getTessControlSource().isEmpty() && source.getTessEvalSource().isEmpty())) {
+				continue;
+			}
+
+			String passNamespace = namespace + "/" + i;
+			if (!source.isValid()) {
+				passes.add(skipped(kind, sanitize(passNamespace + "/" + source.getName()), source.getName(),
+					List.of(), false, source.getDirectives(), "invalid program source or unsupported shader stage"));
+			} else {
+				passes.add(createPass(programSet, source, stage, passNamespace, kind, false, targetFormats));
+			}
+		}
+
+		return List.copyOf(passes);
+	}
+
+	private static IrisVulkanScreenPassGraph.Node createFinalPass(ProgramSet programSet, List<GpuFormat> targetFormats) {
+		return programSet.get(ProgramId.Final)
+			.map(source -> createPass(programSet, source, TextureStage.COMPOSITE_AND_FINAL,
+				"final", IrisVulkanScreenPassGraph.Kind.FINAL, true, targetFormats))
+			.orElse(null);
+	}
+
+	private static IrisVulkanScreenPassGraph.Node createPass(ProgramSet programSet, ProgramSource source,
+																						 TextureStage stage, String namespace,
+																						 IrisVulkanScreenPassGraph.Kind kind,
+																						 boolean collapseOutputs, List<GpuFormat> targetFormats) {
+		String label = sanitize(namespace + "/" + source.getName());
+		String sourceName = source.getName();
+		ProgramDirectives directives = source.getDirectives();
+
+		if (source.getGeometrySource().isPresent()) {
+			return skipped(kind, label, sourceName, List.of(), collapseOutputs, directives,
+				"geometry shaders are not supported yet");
+		}
+
+		Map<PatchShaderType, String> transformed;
+
+		try {
+			transformed = TransformPatcher.patchComposite(
+				sourceName,
+				source.getVertexSource().orElseThrow(NullPointerException::new),
+				null,
+				source.getFragmentSource().orElseThrow(NullPointerException::new),
+				stage,
+				programSet.getPackDirectives().getTextureMap());
+		} catch (RuntimeException e) {
+			return skipped(kind, label, sourceName, List.of(), collapseOutputs, directives,
+				failureReason("transform failed", e));
+		}
+
+		String vertex = IrisVulkanShadowSampling.patch(programSet, IrisVulkanCustomTextures.patchShaderSource(programSet.getPack(), stage,
+			IrisVulkanShaderPruning.removeUnusedUniforms(transformed.get(PatchShaderType.VERTEX))), false);
+		String fragment = IrisVulkanShadowSampling.patch(programSet, IrisVulkanCustomTextures.patchShaderSource(programSet.getPack(), stage,
+			IrisVulkanShaderPruning.removeUnusedUniforms(transformed.get(PatchShaderType.FRAGMENT))), true);
+		List<String> samplers = samplerNames(fragment);
+
+		List<String> unsupportedResources = unsupportedResources(fragment, programSet, stage);
+		List<String> preflightReasons = new ArrayList<>();
+		if (!unsupportedResources.isEmpty()) {
+			preflightReasons.add("unsupported shader resource(s) " + unsupportedResources);
+		}
+		if (!preflightReasons.isEmpty()) {
+			return skipped(kind, label, sourceName, samplers, collapseOutputs, directives,
+				String.join("; ", preflightReasons));
+		}
+
+		int[] configuredDrawBuffers = directives.getDrawBuffers();
+		if (!collapseOutputs) {
+			List<Integer> invalidDrawBuffers = invalidDrawBuffers(configuredDrawBuffers);
+			if (!invalidDrawBuffers.isEmpty()) {
+				return skipped(kind, label, sourceName, samplers, false, directives,
+					"invalid draw buffer(s) " + invalidDrawBuffers + " in ProgramDirectives");
+			}
+		}
+
+		int[] drawBuffers = collapseOutputs ? new int[] { FINAL_SOURCE_TARGET } : configuredDrawBuffers;
+
+		if (!collapseOutputs && drawBuffers.length == 0) {
+			return skipped(kind, label, sourceName, samplers, false, directives, "no color outputs in ProgramDirectives");
+		}
+
+		IrisVulkanScreenPassGraph.PipelineHandle pipeline = new IrisVulkanScreenPassGraph.PipelineHandle(() ->
+			createPipeline(label, drawBuffers, collapseOutputs, targetFormats, vertex, fragment));
+
+		// Keep the directive metadata attached to the node. The executor owns when these
+		// values take effect, including target flipping, viewport scaling, and mipmaps.
+		return new IrisVulkanScreenPassGraph.Node(kind, label, sourceName, drawBuffers, samplers,
+			directives.getExplicitFlips(), directives.getMipmappedBuffers(), directives.getViewportScale(),
+			collapseOutputs, pipeline, vertex, fragment, IrisVulkanScreenPassGraph.Status.READY, "");
+	}
+
+	private static RenderPipeline createPipeline(String label, int[] drawBuffers, boolean collapseOutputs,
+			List<GpuFormat> plannedTargetFormats, String vertex, String fragment) {
+		// These passes never attach depth. Leaving the state unset makes Minecraft's
+		// Vulkan compiler create the withoutDepthPipeline variant used by RenderPass.
+		RenderPipeline.Builder builder = RenderPipeline.builder()
+			.withLocation(Identifier.fromNamespaceAndPath("iris", "vulkan/screen/" + label))
+			.withVertexShader("core/screenquad")
+			.withFragmentShader("core/blit_screen")
+			.withVertexBinding(0, DefaultVertexFormat.POSITION_TEX)
+			.withPrimitiveTopology(PrimitiveTopology.QUADS);
+
+		int attachmentCount = collapseOutputs ? 1 : drawBuffers.length;
+		for (int attachment = 0; attachment < attachmentCount; attachment++) {
+			int logicalTarget = drawBuffers[attachment];
+			GpuFormat plannedFormat = plannedTargetFormats.get(logicalTarget);
+			GpuFormat format = IrisVulkanGbufferTargets.effectiveFormat(logicalTarget, plannedFormat);
+			builder.withColorTargetState(attachment,
+				new ColorTargetState(Optional.empty(), format, ColorTargetState.WRITE_ALL));
+		}
+
+		RenderPipeline pipeline = builder.build();
+		String pipelineVertex = debugFixedScreenPixelSize(label, vertex);
+		pipelineVertex = debugFullScreenVertex(label, pipelineVertex);
+		String pipelineFragment = debugUniformFragment(label, attachmentCount, fragment);
+		pipelineFragment = debugVaryingFragment(label, attachmentCount, pipelineFragment);
+		pipelineFragment = debugSamplerFragment(label, attachmentCount, pipelineFragment);
+		try {
+			IrisNativeVulkan.registerCustomPipelineSource(pipeline, label, pipelineVertex, pipelineFragment, collapseOutputs);
+			return pipeline;
+		} catch (RuntimeException exception) {
+			IrisNativeVulkan.unregisterCustomPipelineSource(pipeline);
+			throw exception;
+		}
+	}
+
+	private static String debugFixedScreenPixelSize(String label, String originalVertex) {
+		String configured = System.getProperty("iris.vulkan.debugScreenPassFixedScreenPixelSize");
+		if (configured == null || !label.equalsIgnoreCase(configured.trim())) {
+			return originalVertex;
+		}
+
+		var target = net.minecraft.client.Minecraft.getInstance().gameRenderer.mainRenderTarget();
+		int width = Math.max(1, target.width);
+		int height = Math.max(1, target.height);
+		String patched = Pattern.compile("(?m)^\\h*uniform\\s+vec2\\s+screenPixelSize\\s*;\\s*\\R?")
+			.matcher(originalVertex).replaceAll("");
+		patched = Pattern.compile("\\bscreenPixelSize\\b").matcher(patched)
+			.replaceAll(Matcher.quoteReplacement("vec2(1.0 / " + width + ".0, 1.0 / " + height + ".0)"));
+		Iris.logger.info("Using fixed {}x{} native Vulkan screen-pixel-size diagnostic for {}.", width, height, label);
+		return patched;
+	}
+
+	private static String debugUniformFragment(String label, int attachmentCount, String originalFragment) {
+		String configured = System.getProperty("iris.vulkan.debugScreenPassUniform");
+		if (configured == null || configured.isBlank()) {
+			return originalFragment;
+		}
+
+		String[] parts = configured.trim().split(":", 3);
+		if (parts.length != 3 || !label.equalsIgnoreCase(parts[0].trim())) {
+			return originalFragment;
+		}
+
+		int attachment;
+		try {
+			attachment = Integer.parseInt(parts[1].trim());
+		} catch (NumberFormatException ignored) {
+			return originalFragment;
+		}
+		String uniform = parts[2].trim();
+		if (attachment < 0 || attachment >= attachmentCount
+			|| !uniform.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+			return originalFragment;
+		}
+
+		Matcher blockMatcher = IRIS_UNIFORM_BLOCK.matcher(originalFragment);
+		String declarations;
+		String type = null;
+		if (blockMatcher.find()) {
+			declarations = blockMatcher.group();
+			Matcher fieldMatcher = Pattern.compile("(?m)^\\h*([A-Za-z_]\\w*)\\s+" + Pattern.quote(uniform) + "\\s*;")
+				.matcher(declarations);
+			if (fieldMatcher.find()) {
+				type = fieldMatcher.group(1);
+			}
+		} else {
+			Matcher looseMatcher = Pattern.compile("(?m)^\\h*uniform\\s+([A-Za-z_]\\w*)\\s+([A-Za-z_]\\w*)\\s*;")
+				.matcher(originalFragment);
+			StringBuilder looseDeclarations = new StringBuilder();
+			while (looseMatcher.find()) {
+				String candidateType = looseMatcher.group(1);
+				String candidateName = looseMatcher.group(2);
+				if (candidateType.contains("sampler") || candidateType.contains("image")) {
+					continue;
+				}
+				looseDeclarations.append(looseMatcher.group()).append('\n');
+				if (candidateName.equals(uniform)) {
+					type = candidateType;
+				}
+			}
+			declarations = looseDeclarations.toString();
+		}
+		if (type == null) {
+			return originalFragment;
+		}
+		String expression = debugVaryingExpression(type, uniform);
+		if (expression == null) {
+			return originalFragment;
+		}
+
+		StringBuilder fragment = new StringBuilder("#version 450 core\n")
+			.append(declarations).append('\n');
+		appendDebugOutputs(fragment, attachmentCount);
+		fragment.append("void main() {\n");
+		appendDebugAssignments(fragment, attachmentCount, attachment, expression);
+		fragment.append("}\n");
+		Iris.logger.info("Using native Vulkan screen pass uniform diagnostic for {} attachment {} from {}.",
+			label, attachment, uniform);
+		return fragment.toString();
+	}
+
+	private static String debugFullScreenVertex(String label, String originalVertex) {
+		String configured = System.getProperty("iris.vulkan.debugScreenPassFullScreenVertex");
+		if (configured == null || !label.equalsIgnoreCase(configured.trim())) {
+			return originalVertex;
+		}
+
+		Iris.logger.info("Using native Vulkan full-screen diagnostic vertex for {}.", label);
+		return """
+			#version 450 core
+			layout(location = 0) in vec3 Position;
+			layout(location = 1) in vec2 UV0;
+			void main() {
+			    gl_Position = vec4(Position.xy * 2.0 - 1.0, 0.0, 1.0);
+			}
+			""";
+	}
+
+	private static String debugVaryingFragment(String label, int attachmentCount, String originalFragment) {
+		String configured = System.getProperty("iris.vulkan.debugScreenPassVarying");
+		if (configured == null || configured.isBlank()) {
+			return originalFragment;
+		}
+
+		String[] parts = configured.trim().split(":", 3);
+		if (parts.length != 3 || !label.equalsIgnoreCase(parts[0].trim())) {
+			return originalFragment;
+		}
+
+		int attachment;
+		try {
+			attachment = Integer.parseInt(parts[1].trim());
+		} catch (NumberFormatException ignored) {
+			return originalFragment;
+		}
+		String varying = parts[2].trim();
+		if (attachment < 0 || attachment >= attachmentCount
+			|| !varying.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+			return originalFragment;
+		}
+
+		Pattern declaration = Pattern.compile("(?m)^\\h*((?:(?:flat|noperspective|smooth|centroid|sample|invariant)\\s+)*)in\\s+([A-Za-z_]\\w*)\\s+"
+			+ Pattern.quote(varying) + "\\s*;");
+		Matcher matcher = declaration.matcher(originalFragment);
+		if (!matcher.find()) {
+			Iris.logger.warn("Cannot probe native Vulkan screen pass varying {} for {} because no fragment input declaration was found.",
+				varying, label);
+			return originalFragment;
+		}
+
+		String qualifiers = matcher.group(1);
+		String type = matcher.group(2);
+		String expression = debugVaryingExpression(type, varying);
+		if (expression == null) {
+			Iris.logger.warn("Cannot probe native Vulkan screen pass varying {} for {} because type {} is unsupported.",
+				varying, label, type);
+			return originalFragment;
+		}
+
+		StringBuilder fragment = new StringBuilder("#version 450 core\n")
+			.append(qualifiers).append("in ").append(type).append(' ').append(varying).append(";\n");
+		appendDebugOutputs(fragment, attachmentCount);
+		fragment.append("void main() {\n");
+		appendDebugAssignments(fragment, attachmentCount, attachment, expression);
+		fragment.append("}\n");
+		Iris.logger.info("Using native Vulkan screen pass varying diagnostic for {} attachment {} from {}.",
+			label, attachment, varying);
+		return fragment.toString();
+	}
+
+	private static String debugVaryingExpression(String type, String varying) {
+		return switch (type) {
+			case "float" -> "vec4(vec3(" + varying + "), 1.0)";
+			case "vec2" -> "vec4(" + varying + ", 0.0, 1.0)";
+			case "vec3" -> "vec4(" + varying + ", 1.0)";
+			case "vec4" -> varying;
+			case "int", "uint" -> "vec4(vec3(float(" + varying + ")), 1.0)";
+			case "ivec2", "uvec2" -> "vec4(vec2(" + varying + "), 0.0, 1.0)";
+			case "ivec3", "uvec3" -> "vec4(vec3(" + varying + "), 1.0)";
+			case "ivec4", "uvec4" -> "vec4(" + varying + ")";
+			default -> null;
+		};
+	}
+
+	private static String debugSamplerFragment(String label, int attachmentCount, String originalFragment) {
+		String configured = System.getProperty("iris.vulkan.debugScreenPassSampler");
+		if (configured == null || configured.isBlank()) {
+			return originalFragment;
+		}
+
+		String[] parts = configured.trim().split(":", 3);
+		if (parts.length != 3 || !label.equalsIgnoreCase(parts[0].trim())) {
+			return originalFragment;
+		}
+
+		int attachment;
+		try {
+			attachment = Integer.parseInt(parts[1].trim());
+		} catch (NumberFormatException ignored) {
+			return originalFragment;
+		}
+		String sampler = parts[2].trim();
+		if (attachment < 0 || attachment >= attachmentCount
+			|| !sampler.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+			return originalFragment;
+		}
+
+		StringBuilder fragment = new StringBuilder("#version 450 core\n")
+			.append("uniform sampler2D ").append(sampler).append(";\n");
+		appendDebugOutputs(fragment, attachmentCount);
+		fragment.append("void main() {\n")
+			.append("    ivec2 size = max(textureSize(").append(sampler).append(", 0), ivec2(1));\n")
+			.append("    ivec2 texel = clamp(ivec2(gl_FragCoord.xy), ivec2(0), size - ivec2(1));\n")
+			.append("    vec4 value = texelFetch(").append(sampler).append(", texel, 0);\n");
+		appendDebugAssignments(fragment, attachmentCount, attachment, "value");
+		fragment.append("}\n");
+		Iris.logger.info("Using native Vulkan screen pass sampler diagnostic for {} attachment {} from {}.",
+			label, attachment, sampler);
+		return fragment.toString();
+	}
+
+	private static void appendDebugOutputs(StringBuilder fragment, int attachmentCount) {
+		for (int index = 0; index < attachmentCount; index++) {
+			fragment.append("layout(location = ").append(index).append(") out vec4 iris_DebugOutput")
+				.append(index).append(";\n");
+		}
+	}
+
+	private static void appendDebugAssignments(StringBuilder fragment, int attachmentCount, int attachment,
+			String expression) {
+		String exposedExpression = debugExposureExpression(expression);
+		for (int index = 0; index < attachmentCount; index++) {
+			fragment.append("    iris_DebugOutput").append(index).append(index == attachment
+				? " = " + exposedExpression + ";\n" : " = vec4(0.0);\n");
+		}
+	}
+
+	private static String debugExposureExpression(String expression) {
+		String configured = System.getProperty("iris.vulkan.debugScreenPassExposure", "1");
+		float exposure;
+		try {
+			exposure = Float.parseFloat(configured);
+		} catch (NumberFormatException ignored) {
+			exposure = 1.0f;
+		}
+		if (!Float.isFinite(exposure) || exposure <= 0.0f || exposure == 1.0f) {
+			return expression;
+		}
+		return "clamp((" + expression + ") * " + Float.toString(exposure) + ", 0.0, 1.0)";
+	}
+
+	private static IrisVulkanScreenPassGraph.Node skipped(IrisVulkanScreenPassGraph.Kind kind, String label,
+															 String sourceName, List<String> samplers,
+															 boolean collapseOutputs, ProgramDirectives directives, String reason) {
+		int[] drawBuffers = directives == null ? new int[0] : directives.getDrawBuffers();
+		return new IrisVulkanScreenPassGraph.Node(kind, label, sourceName, drawBuffers, samplers,
+			directives == null ? Map.of() : directives.getExplicitFlips(),
+			directives == null ? java.util.Set.of() : directives.getMipmappedBuffers(),
+			directives == null ? null : directives.getViewportScale(),
+			collapseOutputs, null, null, null, IrisVulkanScreenPassGraph.Status.SKIPPED, reason);
+	}
+
+	private static List<String> unsupportedResources(String fragment, ProgramSet programSet, TextureStage stage) {
+		List<ResourceUse> resources = new ArrayList<>();
+		Matcher matcher = SAMPLER.matcher(fragment);
+
+		while (matcher.find()) {
+			String type = matcher.group(1);
+			String name = matcher.group(2);
+			String array = matcher.group(3);
+
+			if (array != null) {
+				resources.add(new ResourceUse(matcher.start(), "sampler array " + name + " (" + type + ")"));
+			} else if (IrisNativeVulkan.storageDevelopmentEnabled()
+				&& type.matches("[iu]?sampler3D")
+				&& programSet.getPack().getIrisCustomImages().stream().anyMatch(image -> name.equals(image.samplerName()))) {
+				// Bound by the native storage descriptor bridge, not the 2D texture path.
+			} else if (!isSupportedSamplerType(type) || !isSupportedSamplerName(name, programSet, stage)) {
+				resources.add(new ResourceUse(matcher.start(), "sampler " + name + " (" + type + ")"));
+			}
+		}
+
+		Matcher imageMatcher = IMAGE_UNIFORM.matcher(fragment);
+		while (imageMatcher.find()) {
+			String type = imageMatcher.group(1);
+			String name = imageMatcher.group(2);
+			String array = imageMatcher.group(3);
+			if (array == null && IrisNativeVulkan.storageDevelopmentEnabled()
+				&& type.matches("[iu]?image[23]D")) continue;
+			resources.add(new ResourceUse(imageMatcher.start(),
+				"image uniform" + (array == null ? "" : " array") + " " + name + " (" + type + ")"));
+		}
+
+		Matcher blockMatcher = RESOURCE_BLOCK.matcher(fragment);
+		while (blockMatcher.find()) {
+			String kind = blockMatcher.group(1).equals("buffer") ? "storage block" : "uniform block";
+			String blockType = blockMatcher.group(2);
+			String name = blockMatcher.group(3) == null ? blockType : blockMatcher.group(3);
+			String array = blockMatcher.group(4);
+			if (array == null && blockMatcher.group(1).equals("buffer") && IrisNativeVulkan.storageDevelopmentEnabled()) continue;
+			resources.add(new ResourceUse(blockMatcher.start(),
+				kind + (array == null ? "" : " array") + " " + name + " (" + blockType + ")"));
+		}
+
+		resources.sort((left, right) -> Integer.compare(left.position(), right.position()));
+		return resources.stream().map(ResourceUse::description).toList();
+	}
+
+	private static List<String> samplerNames(String fragment) {
+		Matcher matcher = SAMPLER.matcher(fragment);
+		List<String> samplers = new ArrayList<>();
+
+		while (matcher.find()) {
+			if (IrisNativeVulkan.storageDevelopmentEnabled() && matcher.group(1).matches("[iu]?sampler3D")) continue;
+			samplers.add(matcher.group(2));
+		}
+
+		return List.copyOf(samplers);
+	}
+
+	private static boolean isSupportedSamplerType(String type) {
+		return type.equals("sampler2D") || type.equals("isampler2D") || type.equals("usampler2D");
+	}
+
+	private static boolean isSupportedSamplerName(String name, ProgramSet programSet, TextureStage stage) {
+		if (name.startsWith("colortex")) {
+			try {
+				int index = Integer.parseInt(name.substring("colortex".length()));
+				return index >= 0 && index < COLOR_TARGET_COUNT;
+			} catch (NumberFormatException ignored) {
+				return false;
+			}
+		}
+
+		return switch (name) {
+			case "InSampler", "Sampler0", "u_MainSampler", "texture", "tex", "composite",
+				 "gcolor", "gdepth", "gnormal", "gaux1", "gaux2", "gaux3", "gaux4",
+				 "depthtex0", "depthtex1", "depthtex2", "gdepthtex", "noisetex",
+				 "shadowtex0", "shadowtex1", "shadowcolor0", "shadowcolor1" -> true;
+			default -> IrisVulkanCustomTextures.supports(programSet.getPack(), stage, name);
+		};
+	}
+
+	private static List<Integer> invalidDrawBuffers(int[] configured) {
+		return Arrays.stream(configured)
+			.filter(target -> target < 0 || target >= COLOR_TARGET_COUNT)
+			.boxed()
+			.toList();
+	}
+
+	private static String failureReason(String prefix, RuntimeException exception) {
+		String message = exception.getMessage();
+		return message == null || message.isBlank() ? prefix + " (" + exception.getClass().getSimpleName() + ")"
+			: prefix + ": " + message;
+	}
+
+	private record ResourceUse(int position, String description) {
+	}
+
+	private static String sanitize(String name) {
+		return name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9/._-]", "_");
+	}
+
+	private static void log(IrisVulkanScreenPassGraph graph) {
+		Iris.logger.info("Built native Vulkan screen pass graph: {} begin, {} prepare, {} deferred, {} composite node(s), final={}.",
+			graph.beginPasses().size(), graph.preparePasses().size(), graph.deferredPasses().size(),
+			graph.compositePasses().size(), graph.finalPass() != null);
+
+		Map<String, Integer> skippedReasons = new java.util.LinkedHashMap<>();
+		for (IrisVulkanScreenPassGraph.Node node : graph.nodes()) {
+			if (node.ready()) {
+				Iris.logger.info("Native Vulkan screen pass node {}: status={}, drawBuffers={}, samplers={}, explicitFlips={}, mipmappedBuffers={}, viewport={}, collapseOutputs={}.",
+					node.label(), node.status(), java.util.Arrays.toString(node.drawBuffers()), node.samplers(),
+					node.explicitFlips(), node.mipmappedBuffers(), node.viewport(), node.collapseOutputs());
+			} else {
+				skippedReasons.merge(node.failureReason(), 1, Integer::sum);
+			}
+		}
+
+		if (!skippedReasons.isEmpty()) {
+			Iris.logger.info("Skipped native Vulkan screen pass nodes by reason: {}.", skippedReasons);
+		}
+	}
+}

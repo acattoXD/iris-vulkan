@@ -1,0 +1,1131 @@
+package net.irisshaders.iris.vulkan;
+
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
+import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.DepthStencilState;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.PolygonMode;
+import com.mojang.renderpearl.api.pipeline.UniformType;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
+import com.mojang.renderpearl.api.vertex.VertexFormatElement;
+import net.irisshaders.iris.Iris;
+import net.irisshaders.iris.mixin.vulkan.VKOnly_RenderPipelineAccessor;
+import net.irisshaders.iris.pipeline.transform.Patch;
+import net.irisshaders.iris.pipeline.programs.ShaderKey;
+import net.irisshaders.iris.shaderpack.materialmap.WorldRenderingSettings;
+import net.minecraft.client.renderer.ShaderDefines;
+import net.minecraft.resources.Identifier;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public final class IrisVulkanShaderResources {
+	private static final Pattern COMMENT_BLOCK = Pattern.compile("/\\*.*?\\*/", Pattern.DOTALL);
+	private static final Pattern COMMENT_LINE = Pattern.compile("(?m)//.*$");
+	private static final Pattern VERSION_DIRECTIVE = Pattern.compile("(?m)^\\h*#\\h*version\\h+(\\d+)(?:\\h+(?:core|compatibility|es))?[^\\r\\n]*");
+	private static final Pattern UNIFORM_BLOCK = Pattern.compile("(?m)^\\h*layout\\s*\\([^)]*\\)\\s*uniform\\s+(\\w+)\\s*\\{");
+	private static final Pattern STORAGE_BLOCK = Pattern.compile("(?m)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?(?:(?:coherent|volatile|restrict|readonly|writeonly)\\s+)*buffer\\s+([A-Za-z_][A-Za-z0-9_]*)\\b");
+	private static final Pattern RESOURCE_BLOCK_START = Pattern.compile("\\b(?:uniform|buffer)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{");
+	private static final Pattern BLOCK_INSTANCE_ARRAY = Pattern.compile("\\s*[A-Za-z_][A-Za-z0-9_]*\\s*(?:\\[[^{};]*]\\s*)+;");
+	private static final Pattern SAMPLER = Pattern.compile("(?m)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?uniform\\s+(?:(?:lowp|mediump|highp)\\s+)*([iu]?sampler\\w+)\\s+(\\w+)\\s*((?:\\s*\\[[^]]+])+)?\\s*;");
+	private static final Pattern LOOSE_NON_OPAQUE_UNIFORM = Pattern.compile("(?m)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?uniform\\s+(?:(?:lowp|mediump|highp|coherent|volatile|restrict|readonly|writeonly)\\s+)*([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*[^;]*);\\s*\\R?");
+	private static final Pattern UNIFORM_DECLARATOR = Pattern.compile("^\\h*([A-Za-z_][A-Za-z0-9_]*)(\\s*(?:\\[[^]]+]\\s*)*)$");
+	private static final Pattern VERTEX_INPUT = Pattern.compile("(?m)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?(?:(?:flat|smooth|noperspective|centroid|sample|invariant|precise)\\s+)*(?:in|attribute)\\s+(?:(?:lowp|mediump|highp)\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s*\\[[^;=]+])?\\s*;\\s*\\R?");
+	private static final Pattern FRAGMENT_OUTPUT = Pattern.compile("(?m)^\\h*layout\\s*\\(\\s*location\\s*=\\s*(\\d+)\\s*\\)\\s*out\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*\\R?");
+	private static final Pattern PLAIN_FRAGMENT_OUTPUT = Pattern.compile("(?m)^(\\h*)((?:(?:flat|smooth|noperspective|centroid|sample|invariant|precise)\\s+)*)out\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*\\R?");
+	private static final Pattern DRAWBUFFERS = Pattern.compile("DRAWBUFFERS\\s*:\\s*([0-9]+)");
+	private static final Pattern MAIN_FUNCTION = Pattern.compile("\\bvoid\\s+main\\s*\\([^)]*\\)\\s*\\{");
+	private static final Pattern TBN_VERTEX_OUTPUT = Pattern.compile("(?m)^\\h*flat\\s+out\\s+mat3\\s+tbnMatrix\\s*;\\s*\\R?");
+	private static final Pattern TBN_FRAGMENT_INPUT = Pattern.compile("(?m)^\\h*flat\\s+in\\s+mat3\\s+tbnMatrix\\s*;\\s*\\R?");
+	private static final Pattern SODIUM_REGION_OFFSET_UNIFORM = Pattern.compile("(?m)^\\h*uniform\\s+vec3\\s+u_RegionOffset\\s*;\\s*\\R?");
+	private static final Pattern SODIUM_CURRENT_TIME_UNIFORM = Pattern.compile("(?m)^\\h*uniform\\s+int\\s+u_CurrentTime\\s*;\\s*\\R?");
+	private static final Pattern SODIUM_REGION_ID_UNIFORM = Pattern.compile("(?m)^\\h*uniform\\s+uint\\s+u_RegionID\\s*;\\s*\\R?");
+	private static final Pattern SODIUM_SECTION_TIME_UNIFORM = Pattern.compile("(?m)^\\h*uniform\\s+isamplerBuffer\\s+u_SectionTimeInfo\\s*;\\s*\\R?");
+	private static final Pattern SODIUM_CHUNK_FADE_FETCH = Pattern.compile("(?m)^(\\h*)int\\s+chunkFade\\s*=\\s*texelFetch\\s*\\(\\s*u_SectionTimeInfo\\s*,.*\\)\\s*\\.r\\s*;\\s*$");
+	private static final Pattern FLOAT_TEXTURE_SIZE_INITIALIZER = Pattern.compile("(?m)^(\\h*)(vec[234])\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*textureSize\\s*\\(([^;]+)\\)\\s*;");
+	private static final List<String> DEPTH_SAMPLERS = List.of("depthtex0", "depthtex1", "depthtex2", "gdepthtex");
+	private static final Map<RenderPipeline, ResourceSet> RESOURCE_SETS =
+		java.util.Collections.synchronizedMap(new WeakHashMap<>());
+
+	private IrisVulkanShaderResources() {
+	}
+
+	public static Prepared prepare(RenderPipeline original, ShaderKey shaderKey, String vertex, String fragment) {
+		return prepareInternal(original, shaderKey, chooseVertexFormats(original, shaderKey), vertex, fragment,
+			shaderKey.patch == Patch.SODIUM, -1);
+	}
+
+	public static Prepared prepareGbufferPass(RenderPipeline original, ShaderKey shaderKey, String vertex, String fragment,
+												  int colorTargetCount) {
+		String effectiveFragment = Boolean.getBoolean("iris.vulkan.debugConstantGbufferFragment")
+			? constantGbufferFragment(colorTargetCount)
+			: fragment;
+		return prepareInternal(original, shaderKey, chooseVertexFormats(original, shaderKey), vertex, effectiveFragment,
+			false, colorTargetCount);
+	}
+
+	private static String constantGbufferFragment(int colorTargetCount) {
+		StringBuilder source = new StringBuilder("#version 450 core\n");
+		for (int i = 0; i < colorTargetCount; i++) {
+			source.append("layout(location = ").append(i).append(") out vec4 iris_DebugColor")
+				.append(i).append(";\n");
+		}
+		source.append("void main() {\n");
+		for (int i = 0; i < colorTargetCount; i++) {
+			float red = i == 0 ? 1.0f : 0.0f;
+			float green = i == 1 ? 1.0f : 0.0f;
+			float blue = i == 2 ? 1.0f : 0.0f;
+			source.append("iris_DebugColor").append(i).append(" = vec4(")
+				.append(red).append(", ").append(green).append(", ").append(blue).append(", 1.0);\n");
+		}
+		return source.append("}\n").toString();
+	}
+
+	public static Prepared prepareScreenPass(RenderPipeline original, String vertex, String fragment) {
+		return prepareScreenPass(original, vertex, fragment, true);
+	}
+
+	public static Prepared prepareScreenPass(RenderPipeline original, String vertex, String fragment, boolean collapseFragmentOutputs) {
+		VertexFormat[] vertexFormats = replacePrimaryVertexFormat(original.getVertexFormatBindings().toArray(VertexFormat[]::new), DefaultVertexFormat.POSITION_TEX);
+		return prepareInternal(original, null, vertexFormats, vertex, fragment, collapseFragmentOutputs, -1);
+	}
+
+	private static Prepared prepareInternal(RenderPipeline original, ShaderKey shaderKey, VertexFormat[] vertexFormats,
+											String vertex, String fragment, boolean collapseFragmentOutputs,
+											int colorTargetCount) {
+		vertex = normalizeNativeVersion(vertex);
+		fragment = normalizeNativeVersion(fragment);
+		vertex = IrisVulkanShaderCompatibility.renameSamplerParameters(vertex);
+		fragment = IrisVulkanShaderCompatibility.renameSamplerParameters(fragment);
+		vertex = IrisVulkanShaderCompatibility.initializeLightVolumeAccumulator(vertex);
+		fragment = IrisVulkanShaderCompatibility.initializeLightVolumeAccumulator(fragment);
+		vertex = IrisVulkanShaderPruning.removeUnusedUniforms(vertex);
+		// Core transforms replace vaColor references with the real producer color,
+		// but can leave its now-unused declaration in the shaderc O0 interface.
+		vertex = IrisVulkanShaderPruning.removeUnusedInputs(vertex);
+		fragment = IrisVulkanShaderPruning.removeUnusedUniforms(fragment);
+		fragment = IrisVulkanShaderPruning.removeUnmatchedUnusedInputs(vertex, fragment);
+		String patchedVertex = patchSodiumNativeVulkanUniforms(vertex, shaderKey);
+		String patchedFragment = patchSodiumNativeVulkanUniforms(fragment, shaderKey);
+		patchedVertex = patchWorldProjectionUniforms(patchedVertex, shaderKey);
+		patchedFragment = patchWorldProjectionUniforms(patchedFragment, shaderKey);
+		patchedFragment = patchWorldFragmentCoordinates(patchedFragment, shaderKey);
+		patchedVertex = patchNativeEntityIds(patchedVertex, vertexFormats);
+		patchedVertex = patchStrictVulkanConversions(patchedVertex);
+		patchedFragment = patchStrictVulkanConversions(patchedFragment);
+		// The world pipeline exposes forward-depth R32 snapshots, so indirect
+		// sampler arguments and direct depthtex reads have identical semantics.
+		// Final-only compatibility mode still consumes Minecraft's reverse D32.
+		if (!IrisNativeVulkan.worldDevelopmentEnabled()) {
+			patchedFragment = patchScreenPassDepthSemantics(patchedFragment);
+		}
+		// One GLINT pipeline serves held and world items. Its draw-local hand
+		// flag must enter IrisUniforms before loose uniforms are collected.
+		if (shaderKey == ShaderKey.GLINT) patchedVertex = patchWorldClipDepth(patchedVertex, shaderKey);
+		UniformPatch vertexUniforms = patchLooseUniforms(patchedVertex);
+		UniformPatch fragmentUniforms = patchLooseUniforms(patchedFragment);
+		LinkedHashMap<String, IrisVulkanUniformSnapshot.Field> fieldsByName = new LinkedHashMap<>();
+		LinkedHashSet<UnsupportedResource> unsupported = new LinkedHashSet<>(vertexUniforms.unsupported());
+		unsupported.addAll(fragmentUniforms.unsupported());
+		for (IrisVulkanUniformSnapshot.Field field : vertexUniforms.fields()) {
+			fieldsByName.put(field.name(), field);
+		}
+		for (IrisVulkanUniformSnapshot.Field field : fragmentUniforms.fields()) {
+			IrisVulkanUniformSnapshot.Field previous = fieldsByName.putIfAbsent(field.name(), field);
+			if (previous != null && !previous.type().equals(field.type())) {
+				unsupported.add(new UnsupportedResource("uniform", field.name(), field.type(),
+					"conflicts with " + previous.type() + " in the other shader stage"));
+			}
+		}
+		List<IrisVulkanUniformSnapshot.Field> uniformFields = List.copyOf(fieldsByName.values());
+		patchedVertex = injectUniformBlock(vertexUniforms.source(), uniformFields);
+		patchedFragment = injectUniformBlock(fragmentUniforms.source(), uniformFields);
+		if (shaderKey == null) {
+			patchedVertex = patchScreenPassVertexLocations(patchedVertex);
+		}
+		patchedVertex = patchMissingVertexInputs(patchedVertex, vertexFormats);
+		patchedVertex = patchTbnMatrixOutput(patchedVertex, shaderKey);
+		if (shaderKey != ShaderKey.GLINT) patchedVertex = patchWorldClipDepth(patchedVertex, shaderKey);
+		patchedFragment = patchTbnMatrixInput(patchedFragment, shaderKey);
+		patchedFragment = patchFragmentOutputs(patchedFragment, collapseFragmentOutputs);
+		ResourceSet resources = ResourceSet.collect(patchedVertex, patchedFragment, uniformFields, unsupported);
+		if (!resources.unsupported().isEmpty()) {
+			throw new UnsupportedOperationException("Unsupported Vulkan shader resources: " + resources.unsupported());
+		}
+		RenderPipeline pipeline = extendPipeline(original, resources, vertexFormats, colorTargetCount);
+		RESOURCE_SETS.put(pipeline, resources);
+		IrisVulkanPipelineLayout.registerPreparedPipeline(pipeline, shaderKey);
+
+		return new Prepared(patchedVertex, patchedFragment, pipeline, resources);
+	}
+
+	private static String patchScreenPassVertexLocations(String source) {
+		String patched = Pattern.compile("(?m)^(\\h*)in\\s+vec3\\s+Position\\s*;")
+			.matcher(source).replaceAll("$1layout(location = 0) in vec3 Position;");
+		return Pattern.compile("(?m)^(\\h*)in\\s+vec2\\s+UV0\\s*;")
+			.matcher(patched).replaceAll("$1layout(location = 1) in vec2 UV0;");
+	}
+
+	public static ResourceSet resourcesFor(RenderPipeline pipeline) {
+		return RESOURCE_SETS.get(pipeline);
+	}
+
+	private static String patchSodiumNativeVulkanUniforms(String source, ShaderKey shaderKey) {
+		if (shaderKey == null || shaderKey.patch != Patch.SODIUM) {
+			return source;
+		}
+
+		// The shared 26.3 transformer represents Sodium constants as a UBO for
+		// OpenGL. Vulkan supplies the same 20-byte layout with pushConstants().
+		// Keep its iris_ member names while changing only the storage qualifier.
+		source = Pattern.compile("layout\\s*\\([^)]*\\)\\s*uniform\\s+iris_SodiumPushConstants\\s*\\{")
+			.matcher(source).replaceAll("layout(push_constant) uniform PC {");
+
+		boolean hasRegionOffset = SODIUM_REGION_OFFSET_UNIFORM.matcher(source).find();
+		boolean hasCurrentTime = SODIUM_CURRENT_TIME_UNIFORM.matcher(source).find();
+		boolean hasRegionId = SODIUM_REGION_ID_UNIFORM.matcher(source).find();
+		// Sodium 26.3 binds u_SectionTimeInfo on the shared RenderPass. Keep its
+		// signed texel-buffer fetch so the pack receives real chunk-fade timing.
+
+		if (hasRegionOffset || hasCurrentTime || hasRegionId) {
+			source = SODIUM_REGION_OFFSET_UNIFORM.matcher(source).replaceAll("");
+			source = SODIUM_CURRENT_TIME_UNIFORM.matcher(source).replaceAll("");
+			source = SODIUM_REGION_ID_UNIFORM.matcher(source).replaceAll("");
+			source = insertAfterVersion(source, """
+				layout(push_constant) uniform PC {
+				vec3 u_RegionOffset;
+				int u_CurrentTime;
+				uint u_RegionID;
+				};
+
+				""");
+		}
+
+		return source;
+	}
+
+	private static String patchStrictVulkanConversions(String source) {
+		return FLOAT_TEXTURE_SIZE_INITIALIZER.matcher(source)
+			.replaceAll("$1$2 $3 = $2(textureSize($4));");
+	}
+
+	/** Native helpers use Vulkan GLSL 450 core features after legacy pack syntax has been transformed. */
+	static String normalizeNativeVersion(String source) {
+		if (source.startsWith("\uFEFF")) source = source.substring(1);
+		Matcher version = VERSION_DIRECTIVE.matcher(source);
+		if (!version.find()) throw new IllegalArgumentException("Transformed native shader has no #version directive");
+		int minimumVersion = Math.max(450, Integer.parseInt(version.group(1)));
+		// Keep explicit extension declarations intact: unsupported required features
+		// must remain a compiler error, rather than silently changing pack behavior.
+		return version.replaceFirst("#version " + minimumVersion + " core");
+	}
+
+	static String patchScreenPassDepthSemantics(String source) {
+		String patched = source;
+		StringBuilder helpers = new StringBuilder();
+
+		for (String sampler : DEPTH_SAMPLERS) {
+			String textureFunction = "iris_vulkan_texture_" + sampler;
+			String texelFetchFunction = "iris_vulkan_texelFetch_" + sampler;
+			String textureGatherFunction = "iris_vulkan_textureGather_" + sampler;
+
+			Pattern texture = Pattern.compile("\\btexture\\s*\\(\\s*" + sampler + "\\s*,");
+			Matcher textureMatcher = texture.matcher(patched);
+			boolean hasTexture = textureMatcher.find();
+			if (hasTexture) {
+				patched = textureMatcher.replaceAll(textureFunction + "(");
+			}
+
+			Pattern texelFetch = Pattern.compile("\\btexelFetch\\s*\\(\\s*" + sampler + "\\s*,");
+			Matcher texelFetchMatcher = texelFetch.matcher(patched);
+			boolean hasTexelFetch = texelFetchMatcher.find();
+			if (hasTexelFetch) {
+				patched = texelFetchMatcher.replaceAll(texelFetchFunction + "(");
+			}
+
+			Pattern textureGather = Pattern.compile("\\btextureGather\\s*\\(\\s*" + sampler + "\\s*,");
+			Matcher textureGatherMatcher = textureGather.matcher(patched);
+			boolean hasTextureGather = textureGatherMatcher.find();
+			if (hasTextureGather) {
+				patched = textureGatherMatcher.replaceAll(textureGatherFunction + "(");
+			}
+
+			if (!hasTexture && !hasTexelFetch && !hasTextureGather) {
+				continue;
+			}
+
+			if (hasTexture) {
+				helpers.append("\nvec4 ").append(textureFunction).append("(vec2 coord) {\n")
+					.append("    vec4 value = texture(").append(sampler).append(", coord);\n")
+					.append("    value.r = 1.0 - value.r;\n")
+					.append("    return value;\n}\n")
+					.append("vec4 ").append(textureFunction).append("(vec2 coord, float bias) {\n")
+					.append("    vec4 value = texture(").append(sampler).append(", coord, bias);\n")
+					.append("    value.r = 1.0 - value.r;\n")
+					.append("    return value;\n}\n");
+			}
+			if (hasTexelFetch) {
+				helpers.append("\nvec4 ").append(texelFetchFunction).append("(ivec2 texel, int lod) {\n")
+					.append("    vec4 value = texelFetch(").append(sampler).append(", texel, lod);\n")
+					.append("    value.r = 1.0 - value.r;\n")
+					.append("    return value;\n}\n");
+			}
+			if (hasTextureGather) {
+				helpers.append("\nvec4 ").append(textureGatherFunction).append("(vec2 coord) {\n")
+					.append("    return vec4(1.0) - textureGather(").append(sampler).append(", coord);\n")
+					.append("}\n");
+			}
+		}
+
+		if (helpers.isEmpty()) {
+			return patched;
+		}
+
+		Matcher samplerMatcher = SAMPLER.matcher(patched);
+		int insertionPoint = -1;
+		while (samplerMatcher.find()) {
+			insertionPoint = samplerMatcher.end();
+		}
+		if (insertionPoint < 0) {
+			return patched;
+		}
+
+		return patched.substring(0, insertionPoint) + helpers + patched.substring(insertionPoint);
+	}
+
+	private static RenderPipeline extendPipeline(RenderPipeline original, ResourceSet resources, VertexFormat[] vertexFormats,
+												 int colorTargetCount) {
+		List<String> existingSamplers = IrisVulkanLayouts.samplers(original.getBindGroupLayouts());
+		List<BindGroupLayout.UniformDescription> existingUniforms = BindGroupLayout.flattenUniforms(original.getBindGroupLayouts());
+		BindGroupLayout.Builder extras = BindGroupLayout.builder();
+		boolean hasExtras = false;
+
+		for (String sampler : resources.samplers()) {
+			if (!existingSamplers.contains(sampler)) {
+				extras.withUniform(sampler, UniformType.COMBINED_IMAGE_SAMPLER);
+				hasExtras = true;
+			}
+		}
+
+		for (String uniform : resources.uniformBuffers()) {
+			if (existingUniforms.stream().noneMatch(description -> description.name().equals(uniform))) {
+				extras.withUniform(uniform, UniformType.UNIFORM_BUFFER);
+				hasExtras = true;
+			}
+		}
+
+		for (TexelBuffer texelBuffer : resources.texelBuffers()) {
+			if (existingUniforms.stream().noneMatch(description -> description.name().equals(texelBuffer.name()))) {
+				extras.withUniform(texelBuffer.name(), UniformType.TEXEL_BUFFER, texelBuffer.format());
+				hasExtras = true;
+			}
+		}
+
+		boolean vertexFormatsChanged = !sameVertexFormats(original.getVertexFormatBindings().toArray(VertexFormat[]::new), vertexFormats);
+		boolean colorTargetsChanged = colorTargetCount > 0 && original.getColorTargetStates().size() != colorTargetCount;
+		if (!hasExtras && !vertexFormatsChanged && !colorTargetsChanged) {
+			return original;
+		}
+
+		List<BindGroupLayout> layouts = new ArrayList<>(original.getBindGroupLayouts());
+		if (hasExtras) {
+			layouts.add(extras.build());
+		}
+
+		RenderPipeline extended = copyPipeline(original, layouts, vertexFormats, colorTargetCount);
+
+		if (Iris.getIrisConfig() != null) {
+			Iris.logger.info("Extended Vulkan pipeline {} with Iris resources: samplers={}, uniformBuffers={}, texelBuffers={}, vertexFormats={}",
+				original.getLocation(), resources.samplers(), resources.uniformBuffers(), resources.texelBuffers(),
+				formatVertexFormats(vertexFormats));
+		}
+
+		return extended;
+	}
+
+	private static RenderPipeline copyPipeline(RenderPipeline original, List<BindGroupLayout> layouts, VertexFormat[] vertexFormats,
+											   int colorTargetCount) {
+		Identifier location = original.getLocation();
+		Identifier vertexShader = original.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX);
+		Identifier fragmentShader = original.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.FRAGMENT);
+		ShaderDefines shaderDefines = original.getShaderDefines();
+		ColorTargetState[] colorTargetStates = colorTargetCount > 0
+			? adaptColorTargetStates(original.getColorTargetStates().toArray(ColorTargetState[]::new), colorTargetCount)
+			: original.getColorTargetStates().toArray(ColorTargetState[]::new);
+		DepthStencilState depthStencilState = original.getDepthStencilState();
+		PolygonMode polygonMode = original.getPolygonMode();
+		boolean cull = original.isCull();
+		PrimitiveTopology primitiveTopology = original.getPrimitiveTopology();
+
+		return VKOnly_RenderPipelineAccessor.iris$create(location, original.getShaders(), shaderDefines, layouts,
+			colorTargetStates, depthStencilState, polygonMode, cull, vertexFormats, primitiveTopology, original.pushConstantSize(), original.getSortKey());
+	}
+
+	public static ColorTargetState[] createColorTargetStates(int colorTargetCount) {
+		ColorTargetState[] colorTargetStates = new ColorTargetState[colorTargetCount];
+
+		Arrays.fill(colorTargetStates, ColorTargetState.DEFAULT);
+		return colorTargetStates;
+	}
+
+	private static ColorTargetState[] adaptColorTargetStates(ColorTargetState[] originalStates, int colorTargetCount) {
+		ColorTargetState[] colorTargetStates = Arrays.copyOf(originalStates, colorTargetCount);
+		if (colorTargetCount > originalStates.length) {
+			Arrays.fill(colorTargetStates, originalStates.length, colorTargetCount, ColorTargetState.DEFAULT);
+		}
+
+		return colorTargetStates;
+	}
+
+	public static int[] drawBuffersFromSource(String source) {
+		if (source == null) {
+			return new int[0];
+		}
+
+		Matcher matcher = DRAWBUFFERS.matcher(source);
+		String value = null;
+
+		while (matcher.find()) {
+			value = matcher.group(1);
+		}
+
+		if (value == null || value.isBlank()) {
+			return new int[0];
+		}
+
+		int[] drawBuffers = new int[value.length()];
+		int count = 0;
+
+		for (int i = 0; i < value.length(); i++) {
+			int target = Character.digit(value.charAt(i), 10);
+
+			if (target >= 0 && target < 8) {
+				drawBuffers[count++] = target;
+			}
+		}
+
+		if (count == drawBuffers.length) {
+			return drawBuffers;
+		}
+
+		return Arrays.copyOf(drawBuffers, count);
+	}
+
+	private static VertexFormat[] chooseVertexFormats(RenderPipeline original, ShaderKey shaderKey) {
+		VertexFormat[] originalFormats = original.getVertexFormatBindings().toArray(VertexFormat[]::new);
+
+		if (shaderKey.patch == Patch.SODIUM) {
+			return replacePrimaryVertexFormat(originalFormats, WorldRenderingSettings.INSTANCE.getVertexFormat().getVertexFormat());
+		}
+
+		// RenderType producers use these stable normal-bearing layouts in native
+		// pack worlds. Resolve them independently of frame state for early warmup
+		// and cached/deferred replay; original vanilla/UI pipelines stay unchanged.
+		VertexFormat shaderFormat = IrisVulkanVertexFormats.forShader(original.getVertexFormatBinding(0), original.getPrimitiveTopology(), shaderKey);
+		if (shaderFormat == null) {
+			return originalFormats;
+		}
+
+		return replacePrimaryVertexFormat(originalFormats, aliasVanillaVertexFormat(shaderFormat));
+	}
+
+	/** Keep engine buffer layouts intact, while supplying pack matrices in their documented clip space. */
+	static String patchWorldProjectionUniforms(String source, ShaderKey key) {
+		if (key == null || key.isShadow()) return source;
+		if (key.patch == Patch.SODIUM) {
+			Pattern projectionMember = Pattern.compile("\\bmat4\\s+u_ProjectionMatrix\\s*;");
+			if (!projectionMember.matcher(source).find()) return source;
+			String patched = projectionMember.matcher(source).replaceAll("mat4 iris_NativeProjectionMatrix;");
+			patched = patched.replaceAll("\\bu_ProjectionMatrix\\b", "iris_ProjectionMatrix");
+			return insertAfterVersion(patched, "uniform mat4 iris_ProjectionMatrix;\n");
+		}
+		return Pattern.compile("(?s)layout\\s*\\([^)]*\\)\\s*uniform\\s+iris_Projection\\s*\\{\\s*mat4\\s+iris_ProjMat\\s*;\\s*}\\s*;")
+			.matcher(source).replaceAll("uniform mat4 iris_ProjMat;\n");
+	}
+
+	static String patchNativeEntityIds(String source, VertexFormat[] formats) {
+		if (collectVertexInputs(formats).contains("iris_Entity")) return source;
+		return Pattern.compile("(?m)^\\h*(?:layout\\s*\\([^)]*\\)\\s*)?in\\s+ivec3\\s+iris_Entity\\s*;")
+			.matcher(source).replaceAll("uniform ivec3 iris_NativeEntityIds;\n#define iris_Entity iris_NativeEntityIds\n");
+	}
+
+	/** Convert the shader pack's OpenGL clip range into Minecraft's native reverse-Z range. */
+	static String patchWorldClipDepth(String source, ShaderKey shaderKey) {
+		if (shaderKey == null || shaderKey.isShadow()) return source;
+		Matcher main = MAIN_FUNCTION.matcher(source);
+		if (!main.find()) throw new IllegalArgumentException("World vertex shader has no main function: " + shaderKey);
+		String declaration = main.group().replaceFirst("\\bmain\\b", "iris_vulkan_pack_main");
+		String patched = main.replaceFirst(Matcher.quoteReplacement(declaration));
+		boolean hand = switch (shaderKey.getProgram()) {
+			case Hand, HandWater -> true;
+			default -> false;
+		};
+		boolean glint = shaderKey == ShaderKey.GLINT;
+		if (glint) patched = insertAfterVersion(patched, "uniform int iris_NativeHandDraw;\n");
+		// A wrapper also handles shader packs which return early from main.
+		return patched + "\nvoid main() {\n    iris_vulkan_pack_main();\n"
+			+ "    gl_Position.z = 0.5 * (gl_Position.w - gl_Position.z);\n"
+			+ (hand ? "    gl_Position.z = 0.4375 * gl_Position.w + 0.125 * gl_Position.z;\n" : "")
+			+ (glint ? "    if (iris_NativeHandDraw != 0) gl_Position.z = 0.4375 * gl_Position.w + 0.125 * gl_Position.z;\n" : "")
+			+ "}\n";
+	}
+
+	/** Fragment reconstruction uses forward window depth even though the actual native attachment is reverse-Z. */
+	static String patchWorldFragmentCoordinates(String source, ShaderKey shaderKey) {
+		if (shaderKey == null || shaderKey.isShadow() || !source.contains("gl_FragCoord")) return source;
+		String helper = "iris_vulkan_legacyFragCoord";
+		if (source.contains("vec4 " + helper + "()")) return source;
+		// Replacing the complete vector also covers swizzles such as .xyz and
+		// .wzyx, while leaving native pixel XY and reciprocal W unchanged.
+		String patched = source.replaceAll("\\bgl_FragCoord\\b", helper + "()");
+		return insertAfterVersion(patched, "vec4 " + helper + "() { return vec4(gl_FragCoord.xy, 1.0 - gl_FragCoord.z, gl_FragCoord.w); }\n");
+	}
+
+	private static VertexFormat[] replacePrimaryVertexFormat(VertexFormat[] originalFormats, VertexFormat primary) {
+		VertexFormat[] formats = originalFormats.length >= 16 ? originalFormats.clone() : new VertexFormat[16];
+
+		if (originalFormats.length < 16) {
+			System.arraycopy(originalFormats, 0, formats, 0, originalFormats.length);
+		}
+
+		formats[0] = primary;
+		return formats;
+	}
+
+	static VertexFormat aliasVanillaVertexFormat(VertexFormat source) {
+		VertexFormat.Builder builder = VertexFormat.builder(source.getStepRate());
+		List<VertexFormatElement> elements = source.getElements();
+		for (int first = 0; first < elements.size();) {
+			VertexFormatElement element = elements.get(first);
+			int end = first + 1;
+			while (end < elements.size() && elements.get(end).name().equals(element.name())) end++;
+			int columns = end - first;
+			int stride = columns > 1 ? elements.get(first + 1).offset() - element.offset()
+				: (end < elements.size() ? elements.get(end).offset() : source.getVertexSize()) - element.offset();
+			builder.addAttribute(aliasVanillaAttribute(element.name()), element.offset(), stride, element.format(), columns);
+			first = end;
+		}
+
+		return builder.build();
+	}
+
+	private static String aliasVanillaAttribute(String name) {
+		return switch (name) {
+			case "Position" -> "iris_Position";
+			case "Color" -> "iris_Color";
+			case "UV0" -> "iris_UV0";
+			case "UV1" -> "iris_UV1";
+			case "UV2" -> "iris_UV2";
+			case "UV3" -> "iris_UV3";
+			case "Normal" -> "iris_Normal";
+			case "LineWidth" -> "iris_LineWidth";
+			default -> name;
+		};
+	}
+
+	private static boolean sameVertexFormats(VertexFormat[] first, VertexFormat[] second) {
+		if (first.length != second.length) {
+			return false;
+		}
+
+		for (int i = 0; i < first.length; i++) {
+			if (!Objects.equals(first[i], second[i])) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	private static String formatVertexFormats(VertexFormat[] vertexFormats) {
+		String[] formatted = new String[vertexFormats.length];
+
+		for (int i = 0; i < vertexFormats.length; i++) {
+			formatted[i] = vertexFormats[i] == null ? "null" : vertexFormats[i].toString();
+		}
+
+		return Arrays.toString(formatted);
+	}
+
+	private static UniformPatch patchLooseUniforms(String source) {
+		Matcher matcher = LOOSE_NON_OPAQUE_UNIFORM.matcher(source);
+		StringBuffer result = new StringBuffer(source.length());
+		LinkedHashSet<IrisVulkanUniformSnapshot.Field> fields = new LinkedHashSet<>();
+		LinkedHashSet<UnsupportedResource> unsupported = new LinkedHashSet<>();
+
+		while (matcher.find()) {
+			String type = matcher.group(1);
+			List<UniformDeclarator> declarators = parseUniformDeclarators(matcher.group(2));
+
+			if (isOpaqueUniformType(type)) {
+				if (isUnsupportedOpaqueType(type)) {
+					for (UniformDeclarator declarator : declarators) {
+						unsupported.add(new UnsupportedResource("uniform", declarator.name(), type,
+							"image and subpass resources have no Iris Vulkan binding"));
+					}
+					matcher.appendReplacement(result, "");
+				}
+
+				continue;
+			}
+
+			if (declarators.isEmpty()) {
+				unsupported.add(new UnsupportedResource("uniform", matcher.group(2).trim(), type,
+					"declaration could not be parsed"));
+			} else {
+				for (UniformDeclarator declarator : declarators) {
+					Optional<IrisVulkanUniformSnapshot.Field> field = IrisVulkanUniformSnapshot.field(
+						declarator.name(), type, declarator.arraySuffix());
+					if (field.isPresent()) {
+						fields.add(field.get());
+					} else {
+						unsupported.add(new UnsupportedResource("uniform", declarator.name(), type,
+							IrisVulkanUniformSnapshot.unsupportedReason(
+								declarator.name(), type, declarator.arraySuffix())));
+					}
+				}
+			}
+
+			matcher.appendReplacement(result, "");
+		}
+
+		matcher.appendTail(result);
+		return new UniformPatch(result.toString(), List.copyOf(fields), unsupported);
+	}
+
+	private static List<UniformDeclarator> parseUniformDeclarators(String declarations) {
+		List<UniformDeclarator> result = new ArrayList<>();
+		int start = 0;
+		int depth = 0;
+
+		for (int index = 0; index <= declarations.length(); index++) {
+			char character = index == declarations.length() ? ',' : declarations.charAt(index);
+			if (character == '(' || character == '[' || character == '{') {
+				depth++;
+			} else if (character == ')' || character == ']' || character == '}') {
+				depth = Math.max(0, depth - 1);
+			} else if (character == ',' && depth == 0) {
+				UniformDeclarator declarator = parseUniformDeclarator(declarations.substring(start, index));
+				if (declarator == null) {
+					return List.of();
+				}
+				result.add(declarator);
+				start = index + 1;
+			}
+		}
+
+		return List.copyOf(result);
+	}
+
+	private static UniformDeclarator parseUniformDeclarator(String declaration) {
+		int depth = 0;
+		int initializer = -1;
+		for (int index = 0; index < declaration.length(); index++) {
+			char character = declaration.charAt(index);
+			if (character == '(' || character == '[' || character == '{') {
+				depth++;
+			} else if (character == ')' || character == ']' || character == '}') {
+				depth = Math.max(0, depth - 1);
+			} else if (character == '=' && depth == 0) {
+				initializer = index;
+				break;
+			}
+		}
+
+		String declarator = initializer < 0 ? declaration : declaration.substring(0, initializer);
+		Matcher matcher = UNIFORM_DECLARATOR.matcher(declarator);
+		if (!matcher.matches()) {
+			return null;
+		}
+
+		String arraySuffix = matcher.group(2);
+		return new UniformDeclarator(matcher.group(1), arraySuffix == null || arraySuffix.isBlank() ? null : arraySuffix.trim());
+	}
+
+	private static String injectUniformBlock(String source, List<IrisVulkanUniformSnapshot.Field> fields) {
+		if (fields.isEmpty()) {
+			return source;
+		}
+
+		return insertAfterVersion(source, IrisVulkanUniformSnapshot.declaration(fields) + "\n");
+	}
+
+	private static String patchMissingVertexInputs(String source, VertexFormat[] vertexFormats) {
+		DefineSet defines = new DefineSet();
+		Set<String> availableInputs = collectVertexInputs(vertexFormats);
+		Matcher matcher = VERTEX_INPUT.matcher(source);
+		StringBuffer result = new StringBuffer(source.length());
+
+		while (matcher.find()) {
+			String type = matcher.group(1);
+			String name = matcher.group(2);
+			String arraySuffix = matcher.group(3);
+
+			if (availableInputs.contains(name)) {
+				continue;
+			}
+
+			String expression = defaultVertexInputExpression(name, type, arraySuffix);
+			if (expression == null) {
+				continue;
+			}
+
+			defines.add(name, expression);
+			matcher.appendReplacement(result, "");
+		}
+
+		matcher.appendTail(result);
+		return defines.apply(result.toString());
+	}
+
+	private static String patchFragmentOutputs(String source, boolean collapseFragmentOutputs) {
+		if (!collapseFragmentOutputs) {
+			return addImplicitFragmentOutputLocations(source);
+		}
+
+		Matcher matcher = FRAGMENT_OUTPUT.matcher(source);
+		StringBuffer result = new StringBuffer(source.length());
+		String primaryName = null;
+		String primaryType = null;
+		boolean foundOutput = false;
+
+		while (matcher.find()) {
+			int location = Integer.parseInt(matcher.group(1));
+			String type = matcher.group(2);
+			String name = matcher.group(3);
+			String replacement = type + " " + name + ";\n";
+
+			if (location == 0 && primaryName == null) {
+				primaryName = name;
+				primaryType = type;
+				replacement = "layout(location = 0) out vec4 iris_VulkanCompatColor;\n" + replacement;
+			}
+
+			foundOutput = true;
+			matcher.appendReplacement(result, Matcher.quoteReplacement(replacement));
+		}
+
+		if (!foundOutput || primaryName == null) {
+			return collapsePlainFragmentOutput(source);
+		}
+
+		matcher.appendTail(result);
+		String assignment = "\niris_VulkanCompatColor = " + toVec4(primaryName, primaryType) + ";\n";
+		return appendToMain(result.toString(), assignment);
+	}
+
+	private static String addImplicitFragmentOutputLocations(String source) {
+		Matcher explicitMatcher = FRAGMENT_OUTPUT.matcher(source);
+		int nextLocation = 0;
+
+		while (explicitMatcher.find()) {
+			nextLocation = Math.max(nextLocation, Integer.parseInt(explicitMatcher.group(1)) + 1);
+		}
+
+		Matcher matcher = PLAIN_FRAGMENT_OUTPUT.matcher(source);
+		StringBuffer result = new StringBuffer(source.length());
+
+		while (matcher.find()) {
+			String indent = matcher.group(1);
+			String qualifiers = matcher.group(2);
+			String type = matcher.group(3);
+			String name = matcher.group(4);
+			String replacement = indent + "layout(location = " + nextLocation++ + ") " + qualifiers + "out " + type + " " + name + ";\n";
+			matcher.appendReplacement(result, Matcher.quoteReplacement(replacement));
+		}
+
+		matcher.appendTail(result);
+		return result.toString();
+	}
+
+	private static String collapsePlainFragmentOutput(String source) {
+		Matcher matcher = PLAIN_FRAGMENT_OUTPUT.matcher(source);
+
+		if (!matcher.find()) {
+			return source;
+		}
+
+		String indent = matcher.group(1);
+		String type = matcher.group(3);
+		String name = matcher.group(4);
+		String replacement = indent + "layout(location = 0) out vec4 iris_VulkanCompatColor;\n"
+			+ indent + type + " " + name + ";\n";
+		StringBuffer result = new StringBuffer(source.length());
+		matcher.appendReplacement(result, Matcher.quoteReplacement(replacement));
+		matcher.appendTail(result);
+		String assignment = "\niris_VulkanCompatColor = " + toVec4(name, type) + ";\n";
+		return appendToMain(result.toString(), assignment);
+	}
+
+	private static String patchTbnMatrixOutput(String source, ShaderKey shaderKey) {
+		if (shaderKey == null || shaderKey.patch != Patch.SODIUM || !TBN_VERTEX_OUTPUT.matcher(source).find()) {
+			return source;
+		}
+
+		String replacement = "mat3 iris_vulkan_tbnMatrix;\n"
+			+ "flat out vec3 iris_vulkan_tbnMatrix0;\n"
+			+ "flat out vec3 iris_vulkan_tbnMatrix1;\n"
+			+ "flat out vec3 iris_vulkan_tbnMatrix2;\n"
+			+ "#define tbnMatrix iris_vulkan_tbnMatrix\n";
+		String patched = TBN_VERTEX_OUTPUT.matcher(source).replaceFirst(Matcher.quoteReplacement(replacement));
+		return appendToMain(patched, "\niris_vulkan_tbnMatrix0 = iris_vulkan_tbnMatrix[0];\n"
+			+ "iris_vulkan_tbnMatrix1 = iris_vulkan_tbnMatrix[1];\n"
+			+ "iris_vulkan_tbnMatrix2 = iris_vulkan_tbnMatrix[2];\n");
+	}
+
+	private static String patchTbnMatrixInput(String source, ShaderKey shaderKey) {
+		if (shaderKey == null || shaderKey.patch != Patch.SODIUM || !TBN_FRAGMENT_INPUT.matcher(source).find()) {
+			return source;
+		}
+
+		String replacement = "flat in vec3 iris_vulkan_tbnMatrix0;\n"
+			+ "flat in vec3 iris_vulkan_tbnMatrix1;\n"
+			+ "flat in vec3 iris_vulkan_tbnMatrix2;\n"
+			+ "#define tbnMatrix mat3(iris_vulkan_tbnMatrix0, iris_vulkan_tbnMatrix1, iris_vulkan_tbnMatrix2)\n";
+		return TBN_FRAGMENT_INPUT.matcher(source).replaceFirst(Matcher.quoteReplacement(replacement));
+	}
+
+	private static String toVec4(String name, String type) {
+		return switch (type) {
+			case "vec4" -> name;
+			case "vec3" -> "vec4(" + name + ", 1.0)";
+			case "vec2" -> "vec4(" + name + ", 0.0, 1.0)";
+			case "float" -> "vec4(vec3(" + name + "), 1.0)";
+			default -> "vec4(1.0, 0.0, 1.0, 1.0)";
+		};
+	}
+
+	private static String appendToMain(String source, String statement) {
+		Matcher matcher = MAIN_FUNCTION.matcher(source);
+		if (!matcher.find()) {
+			return source;
+		}
+
+		int depth = 1;
+		for (int index = matcher.end(); index < source.length(); index++) {
+			char current = source.charAt(index);
+
+			if (current == '{') {
+				depth++;
+			} else if (current == '}') {
+				depth--;
+
+				if (depth == 0) {
+					return source.substring(0, index) + statement + source.substring(index);
+				}
+			}
+		}
+
+		return source;
+	}
+
+	private static String insertAfterVersion(String source, String block) {
+		Matcher matcher = Pattern.compile("(?m)^(#version\\s+\\d+.*\\R)").matcher(source);
+
+		if (matcher.find()) {
+			return source.substring(0, matcher.end()) + block + source.substring(matcher.end());
+		}
+
+		return block + source;
+	}
+
+	private static Set<String> collectVertexInputs(VertexFormat[] vertexFormats) {
+		LinkedHashSet<String> inputs = new LinkedHashSet<>();
+
+		for (VertexFormat format : vertexFormats) {
+			if (format == null) {
+				continue;
+			}
+
+			for (VertexFormatElement element : format.getElements()) {
+				inputs.add(element.name());
+			}
+		}
+
+		return inputs;
+	}
+
+	private static String defaultVertexInputExpression(String name, String type, String arraySuffix) {
+		// OpenGL's no-color shader path uses ColorModulator directly. A white
+		// input gives the same result when the Vulkan path multiplies by it.
+		if (name.equals("iris_Color") && type.equals("vec4") && arraySuffix == null) {
+			return "vec4(1.0)";
+		}
+		// Formats such as block outlines omit UV attributes. OpenGL supplies zero
+		// for those disabled arrays; Vulkan needs the equivalent explicit constant.
+		if (name.equals("iris_UV0") || name.equals("iris_UV1") || name.equals("iris_UV2")) {
+			return defaultExpression(type, arraySuffix);
+		}
+		if (name.equals("iris_LineWidth")) {
+			return "1.0";
+		}
+
+		if (name.equals("at_tangent")) {
+			return "vec4(0.0, 0.0, 1.0, 1.0)";
+		}
+
+		if (name.equals("mc_midTexCoord")) {
+			return switch (type) {
+				case "vec2" -> "vec2(0.5)";
+				case "vec3" -> "vec3(0.5, 0.5, 0.0)";
+				case "vec4" -> "vec4(0.5, 0.5, 0.0, 1.0)";
+				default -> defaultExpression(type, arraySuffix);
+			};
+		}
+
+		if (name.equals("iris_Entity") || name.equals("mc_Entity") || name.equals("iris_Normal") || name.equals("at_midBlock")) {
+			return defaultExpression(type, arraySuffix);
+		}
+
+		return null;
+	}
+
+	private static boolean isOpaqueUniformType(String type) {
+		String normalized = type.toLowerCase();
+		return normalized.contains("sampler") || normalized.contains("image") || normalized.startsWith("subpassinput");
+	}
+
+	private static boolean isUnsupportedOpaqueType(String type) {
+		String normalized = type.toLowerCase();
+		if (IrisNativeVulkan.storageDevelopmentEnabled() && normalized.matches("[iu]?image[23]d")) return false;
+		return normalized.contains("image") || normalized.startsWith("subpassinput");
+	}
+
+	private static String defaultExpression(String type, String arraySuffix) {
+		String elementExpression = defaultElementExpression(type);
+
+		if (elementExpression == null) {
+			return null;
+		}
+
+		if (arraySuffix == null || arraySuffix.isBlank()) {
+			return elementExpression;
+		}
+
+		Integer length = parseArrayLength(arraySuffix);
+		if (length == null || length < 1 || length > 32) {
+			return null;
+		}
+
+		StringBuilder builder = new StringBuilder(type).append("[").append(length).append("](");
+		for (int i = 0; i < length; i++) {
+			if (i > 0) {
+				builder.append(", ");
+			}
+
+			builder.append(elementExpression);
+		}
+
+		return builder.append(")").toString();
+	}
+
+	private static Integer parseArrayLength(String arraySuffix) {
+		String trimmed = arraySuffix.trim();
+
+		if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+			return null;
+		}
+
+		try {
+			return Integer.parseInt(trimmed.substring(1, trimmed.length() - 1).trim());
+		} catch (NumberFormatException ignored) {
+			return null;
+		}
+	}
+
+	private static String defaultElementExpression(String type) {
+		return switch (type) {
+			case "float" -> "0.0";
+			case "double" -> "0.0";
+			case "int" -> "0";
+			case "uint" -> "0u";
+			case "bool" -> "false";
+			case "vec2", "vec3", "vec4" -> type + "(0.0)";
+			case "dvec2", "dvec3", "dvec4" -> type + "(0.0)";
+			case "ivec2", "ivec3", "ivec4" -> type + "(0)";
+			case "uvec2", "uvec3", "uvec4" -> type + "(0u)";
+			case "bvec2", "bvec3", "bvec4" -> type + "(false)";
+			case "mat2", "mat3", "mat4" -> type + "(1.0)";
+			case "mat2x2", "mat3x3", "mat4x4" -> type + "(1.0)";
+			case "mat2x3", "mat2x4", "mat3x2", "mat3x4", "mat4x2", "mat4x3" -> type + "(0.0)";
+			default -> null;
+		};
+	}
+
+	private static String stripComments(String source) {
+		return COMMENT_LINE.matcher(COMMENT_BLOCK.matcher(source).replaceAll("")).replaceAll("");
+	}
+
+	private static boolean isSamplerBuffer(String type) {
+		return type.equals("samplerBuffer") || type.equals("isamplerBuffer") || type.equals("usamplerBuffer");
+	}
+
+	private static GpuFormat texelFormat(String type) {
+		if (type.equals("usamplerBuffer")) {
+			return GpuFormat.R32_UINT;
+		}
+
+		if (type.equals("samplerBuffer")) {
+			return GpuFormat.R32_FLOAT;
+		}
+
+		return GpuFormat.R32_SINT;
+	}
+
+	public record Prepared(String vertex, String fragment, RenderPipeline pipeline, ResourceSet resources) {
+	}
+
+	private record UniformPatch(String source, List<IrisVulkanUniformSnapshot.Field> fields,
+								Set<UnsupportedResource> unsupported) {
+	}
+
+	private record UniformDeclarator(String name, String arraySuffix) {
+	}
+
+	public record TexelBuffer(String name, GpuFormat format) {
+	}
+
+	public record SamplerRequirement(String name, String type) {
+	}
+
+	public record UnsupportedResource(String kind, String name, String type, String reason) {
+	}
+
+	public record ResourceSet(Set<String> samplers, Set<String> uniformBuffers, Set<TexelBuffer> texelBuffers,
+							 List<IrisVulkanUniformSnapshot.Field> uniformFields, Set<SamplerRequirement> samplerRequirements,
+							 Set<UnsupportedResource> unsupported) {
+		static ResourceSet collect(String vertex, String fragment, List<IrisVulkanUniformSnapshot.Field> uniformFields,
+									Set<UnsupportedResource> unsupported) {
+			LinkedHashSet<String> samplers = new LinkedHashSet<>();
+			LinkedHashSet<String> uniformBuffers = new LinkedHashSet<>();
+			LinkedHashSet<TexelBuffer> texelBuffers = new LinkedHashSet<>();
+			LinkedHashSet<SamplerRequirement> samplerRequirements = new LinkedHashSet<>();
+
+			collect(stripComments(vertex), samplers, uniformBuffers, texelBuffers, samplerRequirements, unsupported);
+			collect(stripComments(fragment), samplers, uniformBuffers, texelBuffers, samplerRequirements, unsupported);
+
+			return new ResourceSet(orderedSet(samplers), orderedSet(uniformBuffers), orderedSet(texelBuffers),
+				List.copyOf(uniformFields), orderedSet(samplerRequirements), orderedSet(unsupported));
+		}
+
+		private static <T> Set<T> orderedSet(Set<T> values) {
+			return Collections.unmodifiableSet(new LinkedHashSet<>(values));
+		}
+
+		private static void collect(String source, Set<String> samplers, Set<String> uniformBuffers,
+								Set<TexelBuffer> texelBuffers, Set<SamplerRequirement> samplerRequirements,
+								Set<UnsupportedResource> unsupported) {
+			Matcher storageMatcher = STORAGE_BLOCK.matcher(source);
+			while (storageMatcher.find() && !IrisNativeVulkan.storageDevelopmentEnabled()) {
+				unsupported.add(new UnsupportedResource("ssbo", storageMatcher.group(1), "buffer",
+					"storage-buffer resources have no Iris Vulkan binding"));
+			}
+
+			collectBlockArrays(source, unsupported);
+
+			Matcher uniformMatcher = UNIFORM_BLOCK.matcher(source);
+			while (uniformMatcher.find()) {
+				if (uniformMatcher.group(0).contains("push_constant")) {
+					continue;
+				}
+
+				uniformBuffers.add(uniformMatcher.group(1));
+			}
+
+			Matcher samplerMatcher = SAMPLER.matcher(source);
+			while (samplerMatcher.find()) {
+				String type = samplerMatcher.group(1);
+				String name = samplerMatcher.group(2);
+				String arraySuffix = samplerMatcher.group(3);
+				samplerRequirements.add(new SamplerRequirement(name, type));
+
+				if (arraySuffix != null && !arraySuffix.isBlank()) {
+					unsupported.add(new UnsupportedResource("sampler", name, type,
+						"sampler arrays are not represented"));
+					continue;
+				}
+
+				if (isSamplerBuffer(type)) {
+					texelBuffers.add(new TexelBuffer(name, texelFormat(type)));
+					// Both producers bind a signed R32 buffer on the current pass:
+					// cloud face data and Sodium's section/chunk timing data.
+					if (!(name.equals("CloudFaces") || name.equals("u_SectionTimeInfo")) || !type.equals("isamplerBuffer")) {
+						unsupported.add(new UnsupportedResource("sampler", name, type, "texel-buffer resource has no Iris Vulkan binding"));
+					}
+				} else if (IrisNativeVulkan.storageDevelopmentEnabled()
+					&& (type.matches("[iu]?sampler3D") || IrisVulkanStoragePipeline.isStorageSampler(name))) {
+					// Custom images, including integer 2D puddle maps, use the storage
+					// descriptor bridge and must not also require an ordinary texture binding.
+				} else if (!isSupportedSamplerType(type)) {
+					unsupported.add(new UnsupportedResource("sampler", name, type, "opaque sampler type is not representable by the current Vulkan texture path"));
+				} else {
+					samplers.add(name);
+				}
+			}
+		}
+
+		private static boolean isSupportedSamplerType(String type) {
+			return type.equals("sampler2D") || type.equals("isampler2D") || type.equals("usampler2D");
+		}
+
+		private static void collectBlockArrays(String source, Set<UnsupportedResource> unsupported) {
+			Matcher block = RESOURCE_BLOCK_START.matcher(source);
+			Matcher instanceArray = BLOCK_INSTANCE_ARRAY.matcher(source);
+			while (block.find()) {
+				String name = block.group(1);
+				int depth = 1;
+				int end = block.end();
+				while (end < source.length() && depth != 0) {
+					char current = source.charAt(end++);
+					if (current == '{') ++depth;
+					else if (current == '}') --depth;
+				}
+				if (depth != 0) break;
+				// Only the declarator immediately after this block can make it an array.
+				// Searching beyond its closing brace mislabels later function-body array uses.
+				if (instanceArray.region(end, source.length()).lookingAt()) {
+					unsupported.add(new UnsupportedResource("uniform", name, "block array",
+						"uniform and storage-buffer arrays are not represented"));
+				}
+				block.region(end, source.length());
+			}
+		}
+	}
+
+	private static final class DefineSet {
+		private final LinkedHashSet<String> lines = new LinkedHashSet<>();
+
+		void add(String name, String expression) {
+			lines.add("#define " + name + " (" + expression + ")");
+		}
+
+		String apply(String source) {
+			if (lines.isEmpty()) {
+				return source;
+			}
+
+			String block = String.join("\n", lines) + "\n";
+			Matcher matcher = Pattern.compile("(?m)^(#version\\s+\\d+.*\\R)").matcher(source);
+
+			if (matcher.find()) {
+				return source.substring(0, matcher.end()) + block + source.substring(matcher.end());
+			}
+
+			return block + source;
+		}
+	}
+}

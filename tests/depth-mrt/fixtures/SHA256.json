@@ -1,0 +1,18 @@
+{
+  "common/src/main/java/net/irisshaders/iris/vulkan/IrisVulkanDepthCopy.java": {
+    "rejectedExperimentSha256": "5ed61a7d9ff5625675cd248f46b173c511433965837ab2fa9f986016b26e33c9",
+    "restoredAlpha9Sha256": "d4813b0b484dd2534ccf8c512eb223dea396e7f0fd0068c38f188eaa8bb97117"
+  },
+  "common/src/main/java/net/irisshaders/iris/vulkan/IrisVulkanGbufferTargets.java": {
+    "rejectedExperimentSha256": "dfb6b2ace01c098fec51575c31e9d96695321d4c46bbf5c0ef6a135b0a703df1",
+    "restoredAlpha9Sha256": "7a720966179f62a6fdb3ae88d3a5d14cdadc9fe3b9ae4e8bf750be9c512a10a2"
+  },
+  "common/src/main/java/net/irisshaders/iris/vulkan/IrisNativeVulkan.java": {
+    "rejectedExperimentSha256": "9064cfb03923f405adb002208265607e0fec59d63c0f6a0a1a08de3fb6eedc1f",
+    "restoredAlpha9Sha256": "0d59a5f2588a931ec752aa0563b951b73ed6dbfd34a3cd17018219153120bfc8"
+  },
+  "tests/native-world/IrisVulkanDeferredDepthRegression.java": {
+    "rejectedExperimentSha256": "095bf0b6df732f65bc87c129fe463c8cd18005bc45c663fab8c45c1483bc4021",
+    "restoredAlpha9Sha256": "cb34189ed89cdb221b821921f1734bb6325e1a787240a5db48f2afa6383b4163"
+  }
+}

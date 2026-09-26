@@ -1,0 +1,34 @@
+gradle.projectsEvaluated {
+    def relocated = [:]
+    def tag = (rootProject.findProperty('irisProbeJarTag') ?: rootProject.findProperty('irisProbeRunDirectory') ?: 'native-probe').toString()
+    if (!(tag ==~ /[A-Za-z0-9_-]+/)) throw new GradleException('Probe JAR tag must be a simple directory name')
+    rootProject.allprojects {
+        tasks.withType(org.gradle.api.tasks.bundling.Jar).all {
+            def original = archiveFile.get().asFile.canonicalFile
+            destinationDirectory.set(layout.buildDirectory.dir('isolated/' + tag + '/jars'))
+            relocated[original] = archiveFile.get().asFile
+        }
+    }
+    // Compilation also consumes common's API/header artifacts. Update these paths
+    // when the version changes instead of depending on an older default-output JAR.
+    rootProject.allprojects {
+        tasks.withType(org.gradle.api.tasks.compile.JavaCompile).configureEach {
+            dependsOn(classpath.buildDependencies)
+            def actual = classpath.files.collect { relocated.getOrDefault(it.canonicalFile, it) }
+            classpath = rootProject.files(actual)
+        }
+    }
+    // Loom caches artifact paths before this callback; moving Jar outputs alone keeps old inputs.
+    rootProject.project(':fabric').tasks.named('runClient').configure {
+        dependsOn(classpath.buildDependencies)
+        def actual = classpath.files.collect { relocated.getOrDefault(it.canonicalFile, it) }
+        classpath = rootProject.files(actual)
+        doFirst {
+            rootProject.file('build/isolated-runtime-classpath.txt').text = actual.join('\n')
+            actual.findAll { it.name.startsWith('common-') }.each {
+                if (!it.exists()) throw new GradleException("Missing rebuilt probe dependency: " + it)
+                logger.lifecycle("Native probe dependency: " + it)
+            }
+        }
+    }
+}

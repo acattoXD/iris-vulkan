@@ -1,0 +1,565 @@
+package net.irisshaders.iris.uniforms.custom;
+
+import com.google.common.collect.ImmutableMap;
+import it.unimi.dsi.fastutil.objects.Object2IntMap;
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+import it.unimi.dsi.fastutil.objects.Object2ObjectLinkedOpenHashMap;
+import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+import kroppeb.stareval.element.ExpressionElement;
+import kroppeb.stareval.expression.Expression;
+import kroppeb.stareval.expression.VariableExpression;
+import kroppeb.stareval.function.FunctionContext;
+import kroppeb.stareval.function.FunctionReturn;
+import kroppeb.stareval.function.Type;
+import kroppeb.stareval.parser.Parser;
+import kroppeb.stareval.resolver.ExpressionResolver;
+import net.irisshaders.iris.Iris;
+import net.irisshaders.iris.gl.uniform.LocationalUniformHolder;
+import net.irisshaders.iris.gl.uniform.UniformHolder;
+import net.irisshaders.iris.parsing.IrisFunctions;
+import net.irisshaders.iris.parsing.IrisOptions;
+import net.irisshaders.iris.parsing.MatrixType;
+import net.irisshaders.iris.parsing.VectorType;
+import net.irisshaders.iris.uniforms.custom.cached.CachedUniform;
+import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
+import org.joml.Vector2f;
+import org.joml.Vector2i;
+import org.joml.Vector3f;
+import org.joml.Vector3i;
+import org.joml.Vector4f;
+
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+
+
+public class CustomUniforms implements FunctionContext {
+	private final Map<String, CachedUniform> variables = new Object2ObjectLinkedOpenHashMap<>();
+	private final Map<String, Expression> variablesExpressions = new Object2ObjectLinkedOpenHashMap<>();
+	private final CustomUniformFixedInputUniformsHolder inputHolder;
+	private final List<CachedUniform> uniformOrder;
+	private final Map<Object, Object2IntMap<CachedUniform>> locationMap = new Object2ObjectOpenHashMap<>();
+	private final Map<CachedUniform, List<CachedUniform>> dependsOn;
+	private final Set<CachedUniform> updatedThisFrame = Collections.newSetFromMap(new IdentityHashMap<>());
+	// Native programs reuse immutable name lists. Cache only dependency order,
+	// never values: another program can request additional uniforms in this frame.
+	private static final int MAX_UPDATE_PLANS = 512;
+	private final Map<List<String>, UpdatePlan> updatePlans = new IdentityHashMap<>();
+	private long updateEpoch;
+	private final FunctionReturn serializationValue = new FunctionReturn();
+
+	private CustomUniforms(CustomUniformFixedInputUniformsHolder inputHolder, Map<String, Builder.Variable> variables) {
+		this.inputHolder = inputHolder;
+		ExpressionResolver resolver = new ExpressionResolver(
+			IrisFunctions.functions,
+			(name) -> {
+				Type type = this.inputHolder.getType(name);
+				if (type != null)
+					return type;
+				Builder.Variable variable = variables.get(name);
+				if (variable != null)
+					return variable.type;
+				return null;
+			},
+			true);
+
+		for (Builder.Variable variable : variables.values()) {
+			try {
+				Expression expression = resolver.resolveExpression(variable.type, variable.expression);
+				CachedUniform cachedUniform = CachedUniform
+					.forExpression(variable.name, variable.type, expression, this);
+				this.addVariable(expression, cachedUniform);
+				if (variable.uniform) {
+					List<CachedUniform> uniforms = new ArrayList<>();
+					uniforms.add(cachedUniform);
+				}
+				//Iris.logger.info("Was able to resolve uniform " + variable.name + " = " + variable.expression);
+			} catch (Exception e) {
+				Iris.logger
+					.warn("Failed to resolve uniform " + variable.name + ", reason: " + e
+						.getMessage() + " ( = " + variable.expression + ")", e);
+			}
+		}
+
+		{
+			// toposort
+
+			this.dependsOn = new Object2ObjectOpenHashMap<>();
+			Map<CachedUniform, List<CachedUniform>> requiredBy = new Object2ObjectOpenHashMap<>();
+			Object2IntMap<CachedUniform> dependsOnCount = new Object2IntOpenHashMap<>();
+
+			for (CachedUniform input : this.inputHolder.getAll()) {
+				requiredBy.put(input, new ObjectArrayList<>());
+			}
+
+			for (CachedUniform input : this.variables.values()) {
+				requiredBy.put(input, new ObjectArrayList<>());
+			}
+
+			FunctionReturn functionReturn = new FunctionReturn();
+			Set<VariableExpression> requires = new ObjectOpenHashSet<>();
+			Set<CachedUniform> brokenUniforms = new ObjectOpenHashSet<>();
+
+			for (Map.Entry<String, Expression> entry : this.variablesExpressions.entrySet()) {
+				requires.clear();
+
+				entry.getValue().listVariables(requires);
+				if (requires.isEmpty()) {
+					continue;
+				}
+
+				CachedUniform uniform = this.variables.get(entry.getKey());
+
+				List<CachedUniform> dependencies = new ArrayList<>();
+				for (VariableExpression v : requires) {
+					Expression evaluated = v.partialEval(this, functionReturn);
+					if (evaluated instanceof CachedUniform) {
+						dependencies.add((CachedUniform) evaluated);
+					} else {
+						// we are depending on a broken uniform
+						brokenUniforms.add(uniform);
+					}
+				}
+
+				if (dependencies.isEmpty()) {
+					// can be empty if we rely on broken uniforms
+					continue;
+				}
+
+				dependsOn.put(uniform, dependencies);
+				dependsOnCount.put(uniform, dependencies.size());
+
+				for (CachedUniform dependency : dependencies) {
+					requiredBy.get(dependency).add(uniform);
+				}
+			}
+
+			// actual toposort:
+			List<CachedUniform> ordered = new ObjectArrayList<>();
+			List<CachedUniform> free = new ObjectArrayList<>();
+
+			// init
+			for (CachedUniform entry : requiredBy.keySet()) {
+				if (!dependsOnCount.containsKey(entry)) {
+					free.add(entry);
+				}
+			}
+
+			while (!free.isEmpty()) {
+				CachedUniform pop = free.removeLast();
+				if (!brokenUniforms.contains(pop)) {
+					// only add those that aren't broken
+					ordered.add(pop);
+				} else {
+					// mark all those that rely on use as broken too
+					brokenUniforms.addAll(requiredBy.get(pop));
+				}
+				for (CachedUniform dependent : requiredBy.get(pop)) {
+					int count = dependsOnCount.mergeInt(dependent, -1, Integer::sum);
+					assert count >= 0;
+					if (count == 0) {
+						free.add(dependent);
+						dependsOnCount.removeInt(dependent);
+					}
+				}
+			}
+
+			if (!brokenUniforms.isEmpty()) {
+				Iris.logger.warn(
+					"The following uniforms won't work, either because they are broken, or reference a broken uniform: \n" +
+						brokenUniforms.stream().map(CachedUniform::getName).collect(Collectors.joining(", ")));
+			}
+
+			if (!dependsOnCount.isEmpty()) {
+				throw new IllegalStateException("Circular reference detected between: " +
+					dependsOnCount.object2IntEntrySet()
+						.stream()
+						.map(entry -> entry.getKey().getName() + " (" + entry.getIntValue() + ")")
+						.collect(Collectors.joining(", "))
+				);
+			}
+
+			this.uniformOrder = ordered;
+		}
+	}
+
+	private void addVariable(Expression expression, CachedUniform uniform) throws Exception {
+		String name = uniform.getName();
+		if (this.variables.containsKey(name))
+			throw new Exception("Duplicated variable: " + name);
+		if (this.inputHolder.containsKey(name))
+			throw new Exception("Variable shadows build in uniform: " + name);
+
+		this.variables.put(name, uniform);
+		this.variablesExpressions.put(name, expression);
+	}
+
+	public void assignTo(LocationalUniformHolder targetHolder) {
+		Object2IntMap<CachedUniform> locations = new Object2IntOpenHashMap<>();
+		for (CachedUniform uniform : this.uniformOrder) {
+			try {
+				OptionalInt location = targetHolder.location(uniform.getName(), Type.convert(uniform.getType()));
+				if (location.isPresent()) {
+					locations.put(uniform, location.getAsInt());
+				}
+			} catch (Exception e) {
+				throw new RuntimeException(uniform.getName(), e);
+			}
+		}
+		this.locationMap.put(targetHolder, locations);
+	}
+
+	public void mapholderToPass(LocationalUniformHolder holder, Object pass) {
+		locationMap.put(pass, locationMap.remove(holder));
+	}
+
+
+	public void update() {
+		for (CachedUniform value : this.uniformOrder) {
+			value.update();
+		}
+	}
+
+	public void beginFrame() {
+		this.updatedThisFrame.clear();
+		++this.updateEpoch;
+	}
+
+	public void updateFor(Collection<String> names) {
+		// copyOf preserves immutable-list identity and detaches mutable callers.
+		List<String> key = List.copyOf(names);
+		UpdatePlan plan = this.updatePlans.get(key);
+		if (plan == null) {
+			plan = buildUpdatePlan(key);
+			// The provider owns the cache, so reload releases it together with its
+			// graph. Bound diagnostic/mutable callers too, without evicting values.
+			if (this.updatePlans.size() >= MAX_UPDATE_PLANS) this.updatePlans.clear();
+			this.updatePlans.put(key, plan);
+		}
+		if (plan.updated && plan.epoch == this.updateEpoch) return;
+		for (CachedUniform uniform : plan.uniforms) {
+			if (this.updatedThisFrame.add(uniform)) uniform.update();
+		}
+		plan.epoch = this.updateEpoch;
+		plan.updated = true;
+	}
+
+	private UpdatePlan buildUpdatePlan(Collection<String> names) {
+		Set<CachedUniform> required = Collections.newSetFromMap(new IdentityHashMap<>());
+		for (String name : names) {
+			CachedUniform uniform = this.inputHolder.getUniform(name);
+			if (uniform == null) {
+				uniform = this.variables.get(name);
+			}
+			if (uniform != null) {
+				collectDependencies(uniform, required);
+			}
+		}
+
+		List<CachedUniform> ordered = new ArrayList<>();
+		for (CachedUniform uniform : this.uniformOrder) {
+			if (required.contains(uniform)) ordered.add(uniform);
+		}
+		return new UpdatePlan(ordered.toArray(CachedUniform[]::new));
+	}
+
+	private static final class UpdatePlan {
+		private final CachedUniform[] uniforms;
+		private long epoch;
+		private boolean updated;
+
+		private UpdatePlan(CachedUniform[] uniforms) {
+			this.uniforms = uniforms;
+		}
+	}
+
+	private void collectDependencies(CachedUniform uniform, Set<CachedUniform> required) {
+		if (!required.add(uniform)) {
+			return;
+		}
+
+		List<CachedUniform> dependencies = this.dependsOn.get(uniform);
+		if (dependencies != null) {
+			for (CachedUniform dependency : dependencies) {
+				collectDependencies(dependency, required);
+			}
+		}
+	}
+
+	/**
+	 * Returns a copy of a cached fixed input or pack custom variable without
+	 * evaluating its supplier or pushing it to an OpenGL uniform location.
+	 */
+	public Optional<Snapshot> lookup(String name) {
+		CachedUniform uniform = this.inputHolder.getUniform(name);
+		if (uniform == null) {
+			uniform = this.variables.get(name);
+		}
+		if (uniform == null) {
+			return Optional.empty();
+		}
+
+		String type = typeOf(name).orElse(null);
+		if (type == null) {
+			return Optional.empty();
+		}
+
+		FunctionReturn value = new FunctionReturn();
+		uniform.writeTo(value);
+		return Optional.of(new Snapshot(type, switch (type) {
+			case "bool" -> value.booleanReturn;
+			case "int" -> value.intReturn;
+			case "float" -> value.floatReturn;
+			case "vec2", "vec3", "vec4", "ivec2", "ivec3", "mat4" -> value.objectReturn;
+			default -> throw new AssertionError("Unhandled custom uniform type: " + type);
+		}));
+	}
+
+	/**
+	 * Serialize an already-updated cached value immediately, without exposing its
+	 * mutable vector/matrix or allocating a public Snapshot. The caller owns the
+	 * target's byte order and offset; updateFor must run before consumption. This
+	 * method never evaluates a supplier, changes the target cursor, or writes on a
+	 * missing/type-mismatched value. Public lookup retains independent copies.
+	 */
+	public synchronized boolean writeCachedStd140(String name, String expectedType, ByteBuffer target, int offset) {
+		CachedUniform uniform = this.inputHolder.getUniform(name);
+		if (uniform == null) uniform = this.variables.get(name);
+		if (uniform == null || !expectedType.equals(glslType(uniform.getType()))) return false;
+		FunctionReturn value = this.serializationValue;
+		try {
+			uniform.writeTo(value);
+			switch (expectedType) {
+				case "bool" -> target.putInt(offset, value.booleanReturn ? 1 : 0);
+				case "int" -> target.putInt(offset, value.intReturn);
+				case "float" -> target.putFloat(offset, value.floatReturn);
+				case "vec2" -> {
+					Vector2f vector = (Vector2f) value.objectReturn;
+					target.putFloat(offset, vector.x).putFloat(offset + 4, vector.y);
+				}
+				case "ivec2" -> {
+					Vector2i vector = (Vector2i) value.objectReturn;
+					target.putInt(offset, vector.x).putInt(offset + 4, vector.y);
+				}
+				case "vec3" -> {
+					Vector3f vector = (Vector3f) value.objectReturn;
+					target.putFloat(offset, vector.x).putFloat(offset + 4, vector.y).putFloat(offset + 8, vector.z);
+				}
+				case "ivec3" -> {
+					Vector3i vector = (Vector3i) value.objectReturn;
+					target.putInt(offset, vector.x).putInt(offset + 4, vector.y).putInt(offset + 8, vector.z);
+				}
+				case "vec4" -> {
+					Vector4f vector = (Vector4f) value.objectReturn;
+					target.putFloat(offset, vector.x).putFloat(offset + 4, vector.y).putFloat(offset + 8, vector.z).putFloat(offset + 12, vector.w);
+				}
+				case "mat4" -> {
+					Matrix4fc matrix = (Matrix4fc) value.objectReturn;
+					// Explicit column-major stores also support heap/read-only buffer
+					// checks; JOML's unsafe ByteBuffer writer assumes native memory.
+					target.putFloat(offset, matrix.m00()).putFloat(offset + 4, matrix.m01()).putFloat(offset + 8, matrix.m02()).putFloat(offset + 12, matrix.m03());
+					target.putFloat(offset + 16, matrix.m10()).putFloat(offset + 20, matrix.m11()).putFloat(offset + 24, matrix.m12()).putFloat(offset + 28, matrix.m13());
+					target.putFloat(offset + 32, matrix.m20()).putFloat(offset + 36, matrix.m21()).putFloat(offset + 40, matrix.m22()).putFloat(offset + 44, matrix.m23());
+					target.putFloat(offset + 48, matrix.m30()).putFloat(offset + 52, matrix.m31()).putFloat(offset + 56, matrix.m32()).putFloat(offset + 60, matrix.m33());
+				}
+				default -> throw new AssertionError("Unhandled custom uniform type: " + expectedType);
+			}
+			return true;
+		} finally {
+			value.objectReturn = null;
+		}
+	}
+
+	public Optional<String> typeOf(String name) {
+		CachedUniform uniform = this.inputHolder.getUniform(name);
+		if (uniform == null) {
+			uniform = this.variables.get(name);
+		}
+		if (uniform == null) {
+			return Optional.empty();
+		}
+
+		return Optional.ofNullable(glslType(uniform.getType()));
+	}
+
+	public record Snapshot(String type, Object value) {
+		public Snapshot {
+			value = copyValue(value);
+		}
+
+		private static Object copyValue(Object value) {
+			return switch (value) {
+				case Vector2f vector -> new Vector2f(vector);
+				case Vector2i vector -> new Vector2i(vector);
+				case Vector3f vector -> new Vector3f(vector);
+				case Vector3i vector -> new Vector3i(vector);
+				case Vector4f vector -> new Vector4f(vector);
+				case Matrix4fc matrix -> new Matrix4f(matrix);
+				default -> value;
+			};
+		}
+	}
+
+	private static String glslType(Type type) {
+		if (type == Type.Boolean) return "bool";
+		if (type == Type.Int) return "int";
+		if (type == Type.Float) return "float";
+		if (type == VectorType.VEC2) return "vec2";
+		if (type == VectorType.VEC3) return "vec3";
+		if (type == VectorType.VEC4) return "vec4";
+		if (type == VectorType.I_VEC2) return "ivec2";
+		if (type == VectorType.I_VEC3) return "ivec3";
+		if (type == MatrixType.MAT4) return "mat4";
+		return null;
+	}
+
+	public void push(Object pass) {
+		Object2IntMap<CachedUniform> uniforms = this.locationMap.get(pass);
+		if (uniforms != null) {
+			uniforms.forEach(CachedUniform::pushIfChanged);
+		}
+	}
+
+	/**
+	 * This function will do the following:
+	 * <ul>
+	 *     <li>
+	 *         Remove unused uniforms
+	 *     </li>
+	 *     <li>
+	 *         TODO: Create separate push lists for each renderpass
+	 *     </li>
+	 *     <li>
+	 *         TODO: Sort the others in the correct execution line <p/>
+	 *               note: that if a `EVERY_FRAME` depends on a `EVERY_TICK`, it has to correctly now that it's
+	 *               dependency hasn't updated <br/>
+	 *                  suggestion: set a boolean in the `EVERY_TICK` execution line saying this is a tick
+	 *                  and have it set to false in the `EVERY_FRAME`. Depending on the value, `frameDependencies` or
+	 *                  `allDependencies` lists are used
+	 *     </li>
+	 * </ul>
+	 */
+	public void optimise() {
+
+		Object2IntMap<CachedUniform> dependedByCount = new Object2IntOpenHashMap<>();
+
+		// Count the times a uniform is depended on
+		for (List<CachedUniform> dependencies : this.dependsOn.values()) {
+			for (CachedUniform dependency : dependencies) {
+				dependedByCount.mergeInt(dependency, 1, Integer::sum);
+			}
+		}
+
+		// Count the times a pass depends on a uniform
+		// ensures they wont ever be removed
+		for (Object2IntMap<CachedUniform> map : this.locationMap.values()) {
+			for (CachedUniform cachedUniform : map.keySet()) {
+				dependedByCount.mergeInt(cachedUniform, 1, Integer::sum);
+			}
+		}
+
+
+		Set<CachedUniform> unused = new ObjectOpenHashSet<>();
+		for (int i = this.uniformOrder.size() - 1; i >= 0; i--) {
+			CachedUniform uniform = this.uniformOrder.get(i);
+			if (!dependedByCount.containsKey(uniform)) {
+				// not used
+				unused.add(uniform);
+				// remove dependencies
+				List<CachedUniform> dependencies = this.dependsOn.get(uniform);
+				if (dependencies != null) {
+					for (CachedUniform dependency : dependencies) {
+						// reduce count by 1
+						dependedByCount.computeIntIfPresent(dependency, (key, value) -> value - 1);
+					}
+				}
+			}
+		}
+
+		this.uniformOrder.removeAll(unused);
+		this.updatePlans.clear();
+	}
+
+	@Override
+	public boolean hasVariable(String name) {
+		return this.inputHolder.containsKey(name) || this.variables.containsKey(name);
+	}
+
+	@Override
+	public Expression getVariable(String name) {
+		// TODO: Make the simplify just return these ones
+		final CachedUniform inputUniform = this.inputHolder.getUniform(name);
+		if (inputUniform != null)
+			return inputUniform;
+		final CachedUniform customUniform = this.variables.get(name);
+		if (customUniform != null)
+			return customUniform;
+		throw new RuntimeException("Unknown variable: " + name);
+	}
+
+	public static class Builder {
+		final private static Map<String, Type> types = new ImmutableMap.Builder<String, Type>()
+			.put("bool", Type.Boolean)
+			.put("float", Type.Float)
+			.put("int", Type.Int)
+			.put("vec2", VectorType.VEC2)
+			.put("vec3", VectorType.VEC3)
+			.put("vec4", VectorType.VEC4)
+			.build();
+		final Map<String, Variable> variables = new Object2ObjectLinkedOpenHashMap<>();
+
+		public void addVariable(String type, String name, String expression, boolean isUniform) {
+			if (variables.containsKey(name)) {
+				Iris.logger.warn("Ignoring duplicated custom uniform name: " + name);
+				return;
+			}
+
+			Type parsedType = types.get(type);
+			if (parsedType == null) {
+				Iris.logger.warn("Ignoring invalid uniform type: " + type + " of " + name);
+				return;
+			}
+
+			try {
+				ExpressionElement ast = Parser.parse(expression, IrisOptions.options);
+				variables.put(name, new Variable(parsedType, name, ast, isUniform));
+			} catch (Exception e) {
+				Iris.logger.warn("Failed to parse custom variable/uniform " + name + " with expression " + expression, e);
+			}
+		}
+
+		public CustomUniforms build(
+			CustomUniformFixedInputUniformsHolder inputHolder
+		) {
+			return new CustomUniforms(inputHolder, this.variables);
+		}
+
+		@SafeVarargs
+		public final CustomUniforms build(
+			Consumer<UniformHolder>... uniforms
+		) {
+			CustomUniformFixedInputUniformsHolder.Builder inputs = new CustomUniformFixedInputUniformsHolder.Builder();
+			for (Consumer<UniformHolder> uniform : uniforms) {
+				uniform.accept(inputs);
+			}
+			return this.build(inputs.build());
+		}
+
+		private record Variable(Type type, String name, ExpressionElement expression, boolean uniform) {
+		}
+
+
+	}
+}
