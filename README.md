@@ -1,3 +1,16 @@
+# ⚠️ FULLY VIBE CODED: USE AT YOUR OWN RISK ⚠️
+
+> [!WARNING]
+> **THIS FORK IS FULLY VIBE CODED. Its custom modifications are AI-generated.**
+>
+> **Expect bugs, rendering glitches, crashes, and incomplete shader/hardware compatibility.** Passing tests, a successful build, or a release-channel label does not guarantee correctness or stability.
+>
+> **Back up your worlds and use a separate Minecraft instance for testing.**
+>
+> Upstream Iris and third-party components retain their original authorship and attribution.
+
+---
+
 # Iris Vulkan
 
 An unofficial Iris fork with native Vulkan shader-pack rendering for Minecraft.
